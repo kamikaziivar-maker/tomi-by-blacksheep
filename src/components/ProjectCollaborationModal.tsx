@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Copy,
@@ -12,6 +12,11 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { useFinance } from '../store/FinanceContext';
 import { Project, ProjectRole } from '../types/finance';
 import { haptics } from '../utils/haptics';
@@ -76,15 +81,34 @@ export const ProjectCollaborationModal: React.FC<ProjectCollaborationModalProps>
   );
   const [busy, setBusy] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true;
+      setTab(project ? initialMode : 'join');
+      setFeedback(null);
+      setCopiedCode(false);
+    }
+  }, [isOpen, project, initialMode]);
 
   useEffect(() => {
     if (!isOpen) return;
-    setTab(project ? initialMode : 'join');
-    setFeedback(null);
-    setCopiedCode(false);
-  }, [isOpen, project, initialMode]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
 
-  if (!isOpen) return null;
+  if (!shouldRender) return null;
 
   const currentProject = project
     ? state.projects.find((p) => p.id === project.id) || project
@@ -169,12 +193,20 @@ export const ProjectCollaborationModal: React.FC<ProjectCollaborationModalProps>
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
+      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
       role="dialog"
       aria-modal="true"
       aria-label="Collaboration isolée par projet"
+      onClick={onClose}
     >
-      <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl space-y-4">
+      <div
+        className={`w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl space-y-4 ${sheetMotionClass(
+          isVisible
+        )}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mx-auto mb-1 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
 
         <div className="flex items-center justify-between">

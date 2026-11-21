@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Banknote,
   Calculator,
@@ -9,6 +9,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { useFinance } from '../store/FinanceContext';
 import { FundSupport, SupportType } from '../types/finance';
 import {
@@ -59,6 +64,8 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
   ownerTitle,
 }) => {
   const { state, addSupport, updateSupport, deleteSupport } = useFinance();
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
+  const prevOwnerSessionRef = useRef<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [type, setType] = useState<SupportType>(SupportType.BANK);
@@ -68,7 +75,35 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
   const [balance, setBalance] = useState('');
   const [calcOpen, setCalcOpen] = useState(false);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) {
+      prevOwnerSessionRef.current = null;
+      return;
+    }
+    const key = `${ownerType}:${ownerId}`;
+    if (prevOwnerSessionRef.current !== key) {
+      prevOwnerSessionRef.current = key;
+      setEditingId(null);
+      setType(SupportType.BANK);
+      setName('');
+      setReference('');
+      setCurrency('FBU');
+      setBalance('');
+    }
+  }, [isOpen, ownerType, ownerId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented && !calcOpen) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, calcOpen, onClose]);
+
+  if (!shouldRender) return null;
 
   const supports = state.supports.filter(
     (s) => s.ownerType === ownerType && s.ownerId === ownerId
@@ -135,13 +170,22 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
       : 'Mobile Money';
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Supports de fonds — ${ownerTitle}`}
-    >
-      <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl">
+    <>
+      <div
+        className={`fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+          isVisible
+        )}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Supports de fonds — ${ownerTitle}`}
+        onClick={onClose}
+      >
+        <div
+          className={`w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl ${sheetMotionClass(
+            isVisible
+          )}`}
+          onClick={(e) => e.stopPropagation()}
+        >
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -339,6 +383,7 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
             )}
           </div>
         </form>
+        </div>
       </div>
 
       <CalculatorModal
@@ -347,6 +392,6 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
         allowNegative
         onApplyValue={(val) => setBalance(String(val))}
       />
-    </div>
+    </>
   );
 };

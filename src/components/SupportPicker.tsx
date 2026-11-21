@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { CurrencyConfig, FundSupport, SupportType } from '../types/finance';
 import { formatMoney } from '../utils/format';
 import { haptics } from '../utils/haptics';
@@ -28,12 +33,16 @@ export const SupportPicker: React.FC<SupportPickerProps> = ({
   placeholder = 'Sélectionner un support',
 }) => {
   const [open, setOpen] = useState(false);
+  const { shouldRender, isVisible } = useAnimatedVisibility(open);
   const selected = supports.find((s) => s.id === selectedId) || supports[0];
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setOpen(false);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -73,18 +82,22 @@ export const SupportPicker: React.FC<SupportPickerProps> = ({
         <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400" />
       </button>
 
-      {open &&
+      {shouldRender &&
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 animate-in fade-in duration-150"
+            className={`fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+              isVisible
+            )}`}
             role="dialog"
             aria-modal="true"
             aria-label="Choisir un support de fonds"
             onClick={() => setOpen(false)}
           >
             <div
-              className="flex w-full max-w-md max-h-[82vh] flex-col rounded-t-3xl border border-zinc-800 bg-[#121318] shadow-2xl sm:rounded-2xl"
+              className={`flex w-full max-w-md max-h-[82vh] flex-col rounded-t-3xl border border-zinc-800 bg-[#121318] shadow-2xl sm:rounded-2xl ${sheetMotionClass(
+                isVisible
+              )}`}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />

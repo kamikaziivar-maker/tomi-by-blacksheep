@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, Clock, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { haptics } from '../utils/haptics';
 
 interface CustomTimePickerProps {
@@ -29,6 +34,7 @@ export const CustomTimePicker: React.FC<CustomTimePickerProps> = ({
   className = '',
 }) => {
   const [open, setOpen] = useState(false);
+  const { shouldRender, isVisible } = useAnimatedVisibility(open);
   const [draftHour, setDraftHour] = useState('20');
   const [draftMinute, setDraftMinute] = useState('00');
 
@@ -38,7 +44,10 @@ export const CustomTimePicker: React.FC<CustomTimePickerProps> = ({
     setDraftHour(h);
     setDraftMinute(m);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setOpen(false);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -70,18 +79,22 @@ export const CustomTimePicker: React.FC<CustomTimePickerProps> = ({
         <Clock className="h-4 w-4 shrink-0 text-[#F5B971]" />
       </button>
 
-      {open &&
+      {shouldRender &&
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 animate-in fade-in duration-150"
+            className={`fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+              isVisible
+            )}`}
             role="dialog"
             aria-modal="true"
             aria-label={label}
             onClick={() => setOpen(false)}
           >
             <div
-              className="w-full max-w-sm rounded-t-3xl border border-zinc-800 bg-[#121318] p-4 pb-6 shadow-2xl sm:rounded-2xl space-y-4"
+              className={`w-full max-w-sm rounded-t-3xl border border-zinc-800 bg-[#121318] p-4 pb-6 shadow-2xl sm:rounded-2xl space-y-4 ${sheetMotionClass(
+                isVisible
+              )}`}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="mx-auto h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />

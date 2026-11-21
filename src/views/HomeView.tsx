@@ -2,13 +2,16 @@ import React, { useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  Check,
   ChevronDown,
   ChevronUp,
   Eye,
   EyeOff,
   Landmark,
+  Pencil,
   Plus,
   Sparkles,
+  Trash2,
   Wallet,
 } from 'lucide-react';
 import { SegmentedProgressBar } from '../components/SegmentedBar';
@@ -22,6 +25,7 @@ import {
   PocketTarget,
   SupportType,
   TimePeriod,
+  Transaction,
   TransactionType,
 } from '../types/finance';
 import { generateStrategicReport } from '../utils/aiEngine';
@@ -32,10 +36,16 @@ import {
   formatShortDate,
   isDateInPeriod,
 } from '../utils/format';
+import { haptics } from '../utils/haptics';
 
 interface HomeViewProps {
   onNavigate: (tab: NavTab) => void;
-  onOpenQuickEntry: (opts?: { pocket?: PocketTarget; projectId?: string; type?: TransactionType }) => void;
+  onOpenQuickEntry: (opts?: {
+    pocket?: PocketTarget;
+    projectId?: string;
+    type?: TransactionType;
+    editingTransaction?: Transaction;
+  }) => void;
   onOpenNewProject: () => void;
   onOpenSupportManager: (ownerType: 'personal' | 'project', ownerId: string, title: string) => void;
   onOpenProfile: () => void;
@@ -48,10 +58,20 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onOpenSupportManager,
   onOpenProfile,
 }) => {
-  const { state, metrics, setPeriod, setDisplayCurrency, privacyMode, togglePrivacyMode } =
-    useFinance();
+  const {
+    state,
+    metrics,
+    setPeriod,
+    setDisplayCurrency,
+    deleteTransaction,
+    privacyMode,
+    togglePrivacyMode,
+  } = useFinance();
   const { displayCurrency, currencies, period } = state.settings;
   const account = state.settings.account ?? DEFAULT_ACCOUNT_SECURITY;
+
+  const [showAllPersonalTxs, setShowAllPersonalTxs] = useState(false);
+  const [confirmDeleteTxId, setConfirmDeleteTxId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<{
     personal: boolean;
@@ -443,26 +463,39 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   <span className="text-xs font-medium text-zinc-400">
                     Derniers mouvements perso
                   </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onOpenQuickEntry({ pocket: 'personal', type: TransactionType.OUTFLOW })
-                    }
-                    className="text-xs font-medium text-zinc-300 hover:text-[#F5B971]"
-                  >
-                    + Mouvement
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {personalTxs.length > 4 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllPersonalTxs((v) => !v)}
+                        className="text-[11px] font-medium text-zinc-400 hover:text-zinc-200"
+                      >
+                        {showAllPersonalTxs
+                          ? 'Réduire'
+                          : `Voir tout (${personalTxs.length})`}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenQuickEntry({ pocket: 'personal', type: TransactionType.OUTFLOW })
+                      }
+                      className="text-xs font-medium text-zinc-300 hover:text-[#F5B971]"
+                    >
+                      + Mouvement
+                    </button>
+                  </div>
                 </div>
                 {personalTxs.length === 0 ? (
                   <p className="text-xs text-zinc-500 py-2">
                     Aucun mouvement personnel sur cette période.
                   </p>
                 ) : (
-                  <div className="space-y-2">
-                    {personalTxs.slice(0, 4).map((tx) => (
+                  <div className="divide-y divide-zinc-800/50">
+                    {(showAllPersonalTxs ? personalTxs : personalTxs.slice(0, 4)).map((tx) => (
                       <div
                         key={tx.id}
-                        className="flex items-center justify-between text-xs py-1"
+                        className="flex items-center justify-between gap-2 text-xs py-1.5"
                       >
                         <div className="flex items-center gap-2 min-w-0">
                           {tx.type === TransactionType.INFLOW ? (
@@ -475,19 +508,61 @@ export const HomeView: React.FC<HomeViewProps> = ({
                             · {formatShortDate(tx.date)}
                           </span>
                         </div>
-                        <span
-                          className={`font-mono-num font-semibold shrink-0 ml-2 ${
-                            privacyMode
-                              ? 'text-zinc-400'
-                              : tx.type === TransactionType.INFLOW
-                              ? 'text-[#10B981]'
-                              : 'text-zinc-200'
-                          }`}
-                        >
-                          {privacyMode
-                            ? fmt(tx.amountInFbu)
-                            : `${tx.type === TransactionType.INFLOW ? '+' : '-'}${fmt(tx.amountInFbu)}`}
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span
+                            className={`font-mono-num font-semibold ${
+                              privacyMode
+                                ? 'text-zinc-400'
+                                : tx.type === TransactionType.INFLOW
+                                ? 'text-[#10B981]'
+                                : 'text-zinc-200'
+                            }`}
+                          >
+                            {privacyMode
+                              ? fmt(tx.amountInFbu)
+                              : `${tx.type === TransactionType.INFLOW ? '+' : '-'}${fmt(tx.amountInFbu)}`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmDeleteTxId(null);
+                              onOpenQuickEntry({ editingTransaction: tx });
+                            }}
+                            aria-label={`Modifier ${tx.label}`}
+                            title="Corriger l’opération"
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-[#F5B971]"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          {confirmDeleteTxId === tx.id ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void haptics.warning();
+                                deleteTransaction(tx.id);
+                                setConfirmDeleteTxId(null);
+                              }}
+                              aria-label="Confirmer la suppression"
+                              className="inline-flex h-7 items-center gap-1 rounded-lg bg-[#EF4444] px-2 text-[10px] font-bold text-white"
+                            >
+                              <Check className="h-3 w-3" />
+                              <span>Suppr.</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void haptics.tap();
+                                setConfirmDeleteTxId(tx.id);
+                              }}
+                              aria-label={`Supprimer ${tx.label}`}
+                              title="Supprimer l’opération"
+                              className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-800 hover:text-[#EF4444]"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>

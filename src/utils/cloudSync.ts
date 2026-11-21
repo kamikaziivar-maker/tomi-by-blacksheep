@@ -20,38 +20,230 @@ export interface CloudSyncPayload {
   updatedAt: string;
 }
 
-export async function signInOrSignUpRemote(email: string, password: string) {
+export type RemoteAuthErrorCode =
+  | 'not_configured'
+  | 'offline'
+  | 'invalid_credentials'
+  | 'email_not_confirmed'
+  | 'already_registered'
+  | 'weak_password'
+  | 'invalid_email'
+  | 'rate_limited'
+  | 'unknown';
+
+export class RemoteAuthError extends Error {
+  code: RemoteAuthErrorCode;
+  constructor(code: RemoteAuthErrorCode, message: string) {
+    super(message);
+    this.name = 'RemoteAuthError';
+    this.code = code;
+  }
+}
+
+export interface RemoteAuthResult {
+  user: NonNullable<Awaited<ReturnType<typeof getCurrentRemoteUser>>>;
+  hasSession: boolean;
+  needsEmailConfirmation: boolean;
+}
+
+export function mapSupabaseAuthError(rawMessage?: string | null): {
+  code: RemoteAuthErrorCode;
+  message: string;
+} {
+  const msg = (rawMessage || '').trim();
+  const lower = msg.toLowerCase();
+
+  if (
+    lower.includes('invalid login credentials') ||
+    lower.includes('invalid_credentials')
+  ) {
+    return {
+      code: 'invalid_credentials',
+      message:
+        'E-mail ou mot de passe incorrect. Vérifiez vos identifiants ou créez un nouveau compte.',
+    };
+  }
+  if (lower.includes('email not confirmed') || lower.includes('email_not_confirmed')) {
+    return {
+      code: 'email_not_confirmed',
+      message:
+        'Votre adresse e-mail n’est pas encore confirmée. Ouvrez le lien reçu par e-mail (vérifiez aussi les spams) ou cliquez sur « Renvoyer l’e-mail de confirmation ».',
+    };
+  }
+  if (
+    lower.includes('user already registered') ||
+    lower.includes('already been registered') ||
+    lower.includes('user_already_exists')
+  ) {
+    return {
+      code: 'already_registered',
+      message:
+        'Un compte existe déjà avec cette adresse e-mail. Basculez sur « Se connecter » pour entrer votre mot de passe.',
+    };
+  }
+  if (
+    lower.includes('password should be at least') ||
+    lower.includes('weak_password') ||
+    lower.includes('password is too short')
+  ) {
+    return {
+      code: 'weak_password',
+      message: 'Le mot de passe doit contenir au moins 6 caractères.',
+    };
+  }
+  if (
+    lower.includes('unable to validate email') ||
+    lower.includes('invalid email') ||
+    lower.includes('validation_failed')
+  ) {
+    return {
+      code: 'invalid_email',
+      message: 'L’adresse e-mail saisie est invalide.',
+    };
+  }
+  if (
+    lower.includes('rate limit') ||
+    lower.includes('over_email_send_rate_limit') ||
+    lower.includes('for security purposes') ||
+    lower.includes('too many requests')
+  ) {
+    return {
+      code: 'rate_limited',
+      message:
+        'Trop de tentatives récentes. Patientez quelques instants avant de réessayer.',
+    };
+  }
+  if (
+    lower.includes('failed to fetch') ||
+    lower.includes('networkerror') ||
+    lower.includes('network request failed') ||
+    lower.includes('fetch')
+  ) {
+    return {
+      code: 'offline',
+      message:
+        'Impossible de joindre le serveur. Vérifiez votre connexion Internet.',
+    };
+  }
+  if (lower.includes('signup is disabled')) {
+    return {
+      code: 'unknown',
+      message: 'L’inscription par e-mail est désactivée sur ce projet Supabase.',
+    };
+  }
+
+  return {
+    code: 'unknown',
+    message: msg || 'Impossible d’authentifier le compte pour le moment.',
+  };
+}
+
+function assertAuthPreconditions(email: string, password?: string): string {
   if (!supabase || !isSupabaseConfigured) {
-    throw new Error('Supabase n’est pas encore configuré (.env.local).');
+    throw new RemoteAuthError(
+      'not_configured',
+      'Le service Cloud Supabase n’est pas configuré sur cette version.'
+    );
   }
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new RemoteAuthError(
+      'offline',
+      'Connexion Internet requise pour se connecter ou créer un compte Cloud.'
+    );
+  }
+  const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw new RemoteAuthError(
+      'invalid_email',
+      'Veuillez saisir une adresse e-mail valide.'
+    );
+  }
+  if (typeof password === 'string' && password.length < 6) {
+    throw new RemoteAuthError(
+      'weak_password',
+      'Le mot de passe doit contenir au moins 6 caractères.'
+    );
+  }
+  return cleanEmail;
+}
 
-  const trimmedEmail = email.trim().toLowerCase();
-
-  // 1. Tente d'abord une connexion existante
-  const signInRes = await supabase.auth.signInWithPassword({
-    email: trimmedEmail,
+export async function signInRemote(
+  email: string,
+  password: string
+): Promise<RemoteAuthResult> {
+  const cleanEmail = assertAuthPreconditions(email, password);
+  const res = await supabase!.auth.signInWithPassword({
+    email: cleanEmail,
     password,
   });
 
-  if (!signInRes.error && signInRes.data.user) {
-    return signInRes.data.user;
+  if (res.error || !res.data.user) {
+    const mapped = mapSupabaseAuthError(res.error?.message);
+    throw new RemoteAuthError(mapped.code, mapped.message);
   }
 
-  // 2. Si le compte n'existe pas encore, crée le compte
-  const signUpRes = await supabase.auth.signUp({
-    email: trimmedEmail,
+  return {
+    user: res.data.user,
+    hasSession: Boolean(res.data.session),
+    needsEmailConfirmation: !res.data.session,
+  };
+}
+
+export async function signUpRemote(
+  email: string,
+  password: string,
+  displayName?: string
+): Promise<RemoteAuthResult> {
+  const cleanEmail = assertAuthPreconditions(email, password);
+  const cleanName = displayName?.trim();
+
+  const res = await supabase!.auth.signUp({
+    email: cleanEmail,
     password,
+    options: cleanName
+      ? { data: { display_name: cleanName } }
+      : undefined,
   });
 
-  if (signUpRes.error || !signUpRes.data.user) {
-    throw new Error(
-      signUpRes.error?.message ||
-        signInRes.error?.message ||
-        'Impossible de connecter le compte.'
+  if (res.error) {
+    const mapped = mapSupabaseAuthError(res.error.message);
+    throw new RemoteAuthError(mapped.code, mapped.message);
+  }
+
+  const user = res.data.user;
+  if (!user) {
+    throw new RemoteAuthError(
+      'unknown',
+      'Impossible de finaliser la création du compte.'
     );
   }
 
-  return signUpRes.data.user;
+  // Supabase renvoie parfois un utilisateur avec identities=[] si l'e-mail existe déjà (protection anti-énumération)
+  if (Array.isArray(user.identities) && user.identities.length === 0) {
+    throw new RemoteAuthError(
+      'already_registered',
+      'Un compte existe déjà avec cet e-mail. Utilisez « Se connecter » avec votre mot de passe.'
+    );
+  }
+
+  const hasSession = Boolean(res.data.session);
+  return {
+    user,
+    hasSession,
+    needsEmailConfirmation: !hasSession,
+  };
+}
+
+export async function resendConfirmationEmailRemote(email: string): Promise<void> {
+  const cleanEmail = assertAuthPreconditions(email);
+  const { error } = await supabase!.auth.resend({
+    type: 'signup',
+    email: cleanEmail,
+  });
+  if (error) {
+    const mapped = mapSupabaseAuthError(error.message);
+    throw new RemoteAuthError(mapped.code, mapped.message);
+  }
 }
 
 export async function getCurrentRemoteUser() {

@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Search, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { haptics } from '../utils/haptics';
 
 export interface CustomSelectOption {
@@ -45,6 +50,7 @@ export const CustomSelect: React.FC<CustomSelectProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const { shouldRender, isVisible } = useAnimatedVisibility(open);
 
   const selected = useMemo(
     () => options.find((o) => o.value === value),
@@ -69,6 +75,7 @@ export const CustomSelect: React.FC<CustomSelectProps> = ({
     setQuery('');
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
         setOpen(false);
       }
     };
@@ -121,18 +128,22 @@ export const CustomSelect: React.FC<CustomSelectProps> = ({
         )}
       </button>
 
-      {open &&
+      {shouldRender &&
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 animate-in fade-in duration-150"
+            className={`fixed inset-0 z-[80] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+              isVisible
+            )}`}
             role="dialog"
             aria-modal="true"
             aria-label={title}
             onClick={() => setOpen(false)}
           >
             <div
-              className="flex w-full max-w-md max-h-[82vh] flex-col rounded-t-3xl border border-zinc-800 bg-[#121318] shadow-2xl sm:rounded-2xl"
+              className={`flex w-full max-w-md max-h-[82vh] flex-col rounded-t-3xl border border-zinc-800 bg-[#121318] shadow-2xl sm:rounded-2xl ${sheetMotionClass(
+                isVisible
+              )}`}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />

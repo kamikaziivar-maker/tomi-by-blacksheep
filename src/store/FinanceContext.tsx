@@ -9,6 +9,7 @@ import {
   AccountSecuritySettings,
   ChatMessage,
   CurrencyConfig,
+  DebtEntry,
   DebtItem,
   FinanceState,
   FundSupport,
@@ -51,11 +52,18 @@ import {
   syncPushTokenWithSupabase,
 } from '../utils/pushNotifications';
 import {
+  clearAccountLocalCache,
+  getActiveStorageNamespace,
+  getUserNamespace,
   hashPin,
   isIndexedDbSupported,
+  migrateLegacyIndexedDbToLocalNamespace,
+  migrateLegacyLocalStorageToLocalNamespace,
   PersistenceStatus,
   readFromIndexedDb,
   readFromLocalStorage,
+  setActiveStorageNamespace,
+  StorageNamespace,
   writeToIndexedDb,
   writeToLocalStorage,
 } from '../utils/storage';
@@ -136,6 +144,16 @@ interface FinanceContextValue {
     minStockThreshold: number;
     averageUnitCostFbu: number;
   }) => void;
+  updateInventoryItem: (
+    itemId: string,
+    patch: {
+      name: string;
+      unit: string;
+      quantity: number;
+      averageUnitCostFbu: number;
+      minStockThreshold: number;
+    }
+  ) => void;
   updateInventoryThreshold: (itemId: string, minStockThreshold: number) => void;
   deleteInventoryItem: (itemId: string) => void;
   enableProjectSharing: (
@@ -156,6 +174,7 @@ interface FinanceContextValue {
 
   // Transactions & Internal Loans
   addQuickTransaction: (input: QuickTransactionInput) => void;
+  updateQuickTransaction: (txId: string, input: QuickTransactionInput) => void;
   deleteTransaction: (id: string) => void;
   createInternalLoan: (params: {
     projectId: string;
@@ -168,6 +187,15 @@ interface FinanceContextValue {
     reminderDelayDays?: number;
     note?: string;
   }) => void;
+  updateInternalLoan: (
+    loanId: string,
+    patch: {
+      note?: string;
+      reminderDate?: string;
+      reminderDelayDays?: number;
+      initialAmountFbu?: number;
+    }
+  ) => void;
   repayInternalLoan: (params: {
     loanId: string;
     amountFbu: number;
@@ -185,7 +213,37 @@ interface FinanceContextValue {
     date: string;
     dueDate?: string;
     note?: string;
+    supportId?: string;
   }) => void;
+  addDebtEntry: (params: {
+    debtId: string;
+    amountFbu: number;
+    currency?: string;
+    date: string;
+    note?: string;
+    supportId?: string;
+  }) => void;
+  updateDebt: (
+    debtId: string,
+    patch: {
+      personName?: string;
+      direction?: 'debt' | 'receivable';
+      dueDate?: string;
+      note?: string;
+      currency?: string;
+    }
+  ) => void;
+  updateDebtEntry: (
+    debtId: string,
+    entryId: string,
+    patch: {
+      amountFbu: number;
+      date: string;
+      note?: string;
+      supportId?: string;
+    }
+  ) => void;
+  deleteDebtEntry: (debtId: string, entryId: string) => void;
   repayDebt: (params: {
     debtId: string;
     amountFbu: number;
@@ -193,6 +251,17 @@ interface FinanceContextValue {
     supportId?: string;
     note?: string;
   }) => void;
+  updateDebtRepayment: (
+    debtId: string,
+    repaymentId: string,
+    patch: {
+      amountFbu: number;
+      date: string;
+      supportId?: string;
+      note?: string;
+    }
+  ) => void;
+  deleteDebtRepayment: (debtId: string, repaymentId: string) => void;
   deleteDebt: (id: string) => void;
 
   // Savings
@@ -204,6 +273,16 @@ interface FinanceContextValue {
     deadline?: string;
     note?: string;
   }) => void;
+  updateSavingsGoal: (
+    id: string,
+    patch: {
+      name: string;
+      targetAmountFbu: number;
+      currentAmountFbu: number;
+      note?: string;
+      deadline?: string;
+    }
+  ) => void;
   adjustSavingsGoal: (params: {
     goalId: string;
     deltaFbu: number; // positive = deposit, negative = withdraw
@@ -225,6 +304,7 @@ interface FinanceContextValue {
   resetToEmpty: () => void;
 
   // Account, Security & Remote Cloud Sync
+  activeNamespace: StorageNamespace;
   isLocked: boolean;
   lockApp: () => void;
   unlockApp: () => void;
@@ -234,7 +314,26 @@ interface FinanceContextValue {
   updateAccountProfile: (
     patch: Partial<Omit<AccountSecuritySettings, 'pinEnabled' | 'pinHash'>>
   ) => void;
-  loginRemoteAccount: (email: string, password: string) => Promise<{ ok: boolean; message: string }>;
+  loginRemoteAccount: (
+    email: string,
+    password: string
+  ) => Promise<{
+    ok: boolean;
+    message: string;
+    needsEmailConfirmation?: boolean;
+    errorCode?: string;
+  }>;
+  registerRemoteAccount: (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => Promise<{
+    ok: boolean;
+    message: string;
+    needsEmailConfirmation?: boolean;
+    errorCode?: string;
+  }>;
+  resendRemoteConfirmation: (email: string) => Promise<{ ok: boolean; message: string }>;
   logoutRemoteAccount: () => Promise<void>;
 
   // Privacy / Discret Mode & Shake Detection
@@ -318,17 +417,31 @@ function normalizeLoadedState(parsed: Partial<FinanceState>): FinanceState {
   };
 }
 
-function loadInitialState(): { state: FinanceState; updatedAt: string; hadLocal: boolean } {
-  const localPayload = readFromLocalStorage();
+function createCleanRemoteState(): FinanceState {
+  const cloned = JSON.parse(JSON.stringify(EMPTY_FINANCE_STATE)) as Partial<FinanceState>;
+  return normalizeLoadedState(cloned);
+}
+
+function loadInitialState(): {
+  namespace: StorageNamespace;
+  state: FinanceState;
+  updatedAt: string;
+  hadLocal: boolean;
+} {
+  migrateLegacyLocalStorageToLocalNamespace();
+  const namespace = getActiveStorageNamespace();
+  const localPayload = readFromLocalStorage(namespace);
   if (localPayload) {
     return {
+      namespace,
       state: normalizeLoadedState(localPayload.state),
       updatedAt: localPayload.updatedAt,
       hadLocal: true,
     };
   }
   return {
-    state: createStarterFinanceState(),
+    namespace,
+    state: namespace === 'local' ? createStarterFinanceState() : createCleanRemoteState(),
     updatedAt: new Date(0).toISOString(),
     hadLocal: false,
   };
@@ -336,6 +449,8 @@ function loadInitialState(): { state: FinanceState; updatedAt: string; hadLocal:
 
 export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const initialBoot = useMemo(() => loadInitialState(), []);
+  const [activeNamespace, setActiveNamespace] = useState<StorageNamespace>(initialBoot.namespace);
+  const activeNamespaceRef = useRef<StorageNamespace>(initialBoot.namespace);
   const [state, setState] = useState<FinanceState>(initialBoot.state);
   const localUpdatedAtRef = useRef<string>(initialBoot.updatedAt);
   const hadLocalRef = useRef<boolean>(initialBoot.hadLocal);
@@ -396,30 +511,136 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Background check of IndexedDB backup on mount (recovers if localStorage was wiped)
   useEffect(() => {
     let active = true;
-    readFromIndexedDb().then((idbPayload) => {
-      if (!active || !idbPayload) return;
+    const bootNs = initialBoot.namespace;
+    void (async () => {
+      await migrateLegacyIndexedDbToLocalNamespace();
+      const idbPayload = await readFromIndexedDb(bootNs);
+      if (!active || !idbPayload || activeNamespaceRef.current !== bootNs) return;
       const shouldRestore =
         !hadLocalRef.current || idbPayload.updatedAt > localUpdatedAtRef.current;
       if (shouldRestore) {
         const restored = normalizeLoadedState(idbPayload.state);
         localUpdatedAtRef.current = idbPayload.updatedAt;
+        hadLocalRef.current = true;
         setState(restored);
         if (restored.settings.account?.pinEnabled && restored.settings.account?.pinHash) {
           setIsLocked(true);
         }
       }
-    });
+    })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [initialBoot.namespace]);
 
-  // Dual automatic backup: localStorage (sync) + IndexedDB (async)
+  // Au démarrage d'une session cloud existante, resynchronise discrètement depuis Supabase si en ligne
   useEffect(() => {
+    const bootNs = initialBoot.namespace;
+    if (!bootNs.startsWith('user:') || !isSupabaseConfigured || !navigator.onLine) return;
+    let active = true;
+    const expectedUid = bootNs.slice(5);
+
+    void (async () => {
+      try {
+        const {
+          getCurrentRemoteUser,
+          pullFinanceStateFromCloud,
+          fetchUserSharedProjectsRemote,
+        } = await import('../utils/cloudSync');
+        const user = await getCurrentRemoteUser();
+        if (!active || !user || user.id !== expectedUid || activeNamespaceRef.current !== bootNs) {
+          return;
+        }
+        const [remotePayload, sharedBundles] = await Promise.all([
+          pullFinanceStateFromCloud(),
+          fetchUserSharedProjectsRemote(),
+        ]);
+        if (!active || activeNamespaceRef.current !== bootNs) return;
+
+        setState((prev) => {
+          let base = prev;
+          if (
+            remotePayload?.stateJson &&
+            (!hadLocalRef.current || remotePayload.updatedAt > localUpdatedAtRef.current)
+          ) {
+            base = normalizeLoadedState(remotePayload.stateJson as Partial<FinanceState>);
+            localUpdatedAtRef.current = remotePayload.updatedAt;
+            hadLocalRef.current = true;
+          }
+
+          if (sharedBundles.length > 0) {
+            const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
+              const map = new Map(existing.map((e) => [e.id, e]));
+              for (const item of incoming) map.set(item.id, item);
+              return Array.from(map.values());
+            };
+            let nextProjects = base.projects;
+            let nextSupports = base.supports;
+            let nextInventory = base.inventoryItems ?? [];
+            let nextMembers = base.projectMembers ?? [];
+            let nextTxs = base.transactions;
+            for (const b of sharedBundles) {
+              nextProjects = mergeById(nextProjects, [b.project]);
+              nextSupports = mergeById(nextSupports, b.supports);
+              nextInventory = mergeById(nextInventory, b.inventory);
+              nextMembers = mergeById(nextMembers, b.members);
+              nextTxs = mergeById(nextTxs, b.transactions);
+            }
+            base = {
+              ...base,
+              projects: nextProjects,
+              supports: nextSupports,
+              inventoryItems: nextInventory,
+              projectMembers: nextMembers,
+              transactions: nextTxs.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+            };
+          }
+
+          return {
+            ...base,
+            settings: {
+              ...base.settings,
+              account: {
+                ...DEFAULT_ACCOUNT_SECURITY,
+                ...(base.settings.account ?? {}),
+                mode: 'cloud_ready',
+                remoteUserId: user.id,
+                email: (user.email || base.settings.account?.email || '').trim().toLowerCase(),
+                cloudProviderLabel: 'Supabase',
+              },
+            },
+          };
+        });
+      } catch {
+        // Reste fluide sur le cache local isolé du compte si réseau instable
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [initialBoot.namespace]);
+
+  // Dual automatic backup strictement cloisonné par namespace (localStorage sync + IndexedDB async)
+  useEffect(() => {
+    if (activeNamespace !== activeNamespaceRef.current) return;
+
+    const acc = state.settings.account;
+    // Double verrou de sécurité anti-mélange entre profil local et comptes distants
+    if (activeNamespace === 'local' && acc?.mode === 'cloud_ready' && acc?.remoteUserId) {
+      return;
+    }
+    if (activeNamespace.startsWith('user:')) {
+      const expectedUid = activeNamespace.slice(5);
+      if (acc?.remoteUserId !== expectedUid) {
+        return;
+      }
+    }
+
     const nowIso = new Date().toISOString();
     localUpdatedAtRef.current = nowIso;
     const payload = { updatedAt: nowIso, state };
-    const lsOk = writeToLocalStorage(payload);
+    const lsOk = writeToLocalStorage(payload, activeNamespace);
 
     let cancelled = false;
     setPersistenceStatus((prev) => ({
@@ -428,7 +649,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       lastSavedAt: nowIso,
     }));
 
-    writeToIndexedDb(payload).then((idbOk) => {
+    writeToIndexedDb(payload, activeNamespace).then((idbOk) => {
       if (cancelled) return;
       setPersistenceStatus((prev) => ({
         ...prev,
@@ -439,7 +660,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => {
       cancelled = true;
     };
-  }, [state]);
+  }, [state, activeNamespace]);
 
   // Evaluate smart notifications whenever financial data or notification settings change, plus periodic 60s check for daily reminder time
   const syncNotificationsFromState = () => {
@@ -722,6 +943,47 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
+  const updateInventoryItem: FinanceContextValue['updateInventoryItem'] = (itemId, patch) => {
+    const nowIso = new Date().toISOString();
+    setState((prev) => {
+      const list = prev.inventoryItems ?? [];
+      const target = list.find((i) => i.id === itemId);
+      if (!target) return prev;
+      const proj = prev.projects.find((p) => p.id === target.projectId);
+      if (proj?.sharedAccessRole === 'viewer') return prev;
+
+      const cleanName = patch.name.trim() || target.name;
+      const updated: InventoryItem = {
+        ...target,
+        name: cleanName,
+        unit: patch.unit.trim() || target.unit,
+        quantity: Math.max(0, patch.quantity),
+        averageUnitCostFbu: Math.max(0, Math.round(patch.averageUnitCostFbu)),
+        minStockThreshold: Math.max(0, patch.minStockThreshold),
+        updatedAt: nowIso,
+      };
+
+      const nextQueue: SharedProjectSyncOp[] = proj?.isShared
+        ? [
+            ...(prev.pendingSyncQueue ?? []),
+            {
+              id: generateId('sync'),
+              projectId: target.projectId,
+              kind: 'upsert_inventory',
+              payload: updated,
+              createdAt: nowIso,
+            },
+          ]
+        : prev.pendingSyncQueue ?? [];
+
+      return {
+        ...prev,
+        inventoryItems: list.map((i) => (i.id === itemId ? updated : i)),
+        pendingSyncQueue: nextQueue,
+      };
+    });
+  };
+
   const updateInventoryThreshold = (itemId: string, minStockThreshold: number) => {
     const nowIso = new Date().toISOString();
     setState((prev) => {
@@ -771,295 +1033,477 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
-  const addQuickTransaction = (input: QuickTransactionInput) => {
-    setState((prev) => {
-      const { currencies } = prev.settings;
-      const targetProject =
-        input.pocket === 'project' && input.projectId
-          ? prev.projects.find((p) => p.id === input.projectId)
-          : undefined;
+  const normalizeDebtEntries = (item: DebtItem): DebtEntry[] => {
+    if (Array.isArray(item.entries) && item.entries.length > 0) {
+      return item.entries;
+    }
+    return [
+      {
+        id: `${item.id}_init`,
+        amountFbu: Math.max(0, item.initialAmountFbu),
+        currency: item.currency,
+        date: item.date,
+        note: item.note,
+      },
+    ];
+  };
 
-      if (targetProject?.sharedAccessRole === 'viewer') {
-        return prev;
+  const recomputeDebt = (item: DebtItem, nextEntries?: DebtEntry[]): DebtItem => {
+    const entries = nextEntries ?? normalizeDebtEntries(item);
+    const totalInitial = entries.reduce((sum, e) => sum + Math.max(0, e.amountFbu), 0);
+    const totalRepaid = item.repayments.reduce((sum, r) => sum + Math.max(0, r.amountFbu), 0);
+    const earliestDate = entries.reduce(
+      (min, e) => (!min || (e.date && e.date < min) ? e.date : min),
+      item.date
+    );
+    return {
+      ...item,
+      entries,
+      date: earliestDate || item.date,
+      initialAmountFbu: totalInitial,
+      remainingAmountFbu: Math.max(0, totalInitial - totalRepaid),
+    };
+  };
+
+  const adjustSupportBalanceList = (
+    supports: FundSupport[],
+    supportId: string | undefined,
+    deltaFbu: number,
+    currencies: CurrencyConfig[]
+  ): FundSupport[] => {
+    if (!supportId || deltaFbu === 0) return supports;
+    return supports.map((s) => {
+      if (s.id !== supportId) return s;
+      const deltaInSupportCurr = convertFromFbu(deltaFbu, s.currency, currencies);
+      const nextBal = Math.round((s.balance + deltaInSupportCurr) * 100) / 100;
+      return { ...s, balance: nextBal };
+    });
+  };
+
+  const reverseTransactionEffects = (prev: FinanceState, oldTx: Transaction): FinanceState => {
+    const { currencies } = prev.settings;
+    const nowIso = new Date().toISOString();
+    let nextSupports = [...prev.supports];
+    let nextSavings = [...prev.savingsGoals];
+    let nextDebts = [...prev.debts];
+    let nextLoans = [...prev.internalLoans];
+    let nextInventory = [...(prev.inventoryItems ?? [])];
+
+    const adjustSupport = (supportId: string | undefined, deltaFbu: number) => {
+      nextSupports = adjustSupportBalanceList(nextSupports, supportId, deltaFbu, currencies);
+    };
+
+    if (oldTx.type === TransactionType.INFLOW) {
+      adjustSupport(oldTx.supportId, -oldTx.amountInFbu);
+    } else if (oldTx.type === TransactionType.OUTFLOW) {
+      adjustSupport(oldTx.supportId, oldTx.amountInFbu);
+    } else if (
+      oldTx.type === TransactionType.TRANSFER ||
+      oldTx.type === TransactionType.INTERNAL_LOAN ||
+      oldTx.type === TransactionType.LOAN_REPAYMENT
+    ) {
+      adjustSupport(oldTx.supportId, oldTx.amountInFbu);
+      if (oldTx.targetSupportId) {
+        adjustSupport(oldTx.targetSupportId, -oldTx.amountInFbu);
       }
+    }
 
-      const amountInFbu = convertToFbu(input.amount, input.currency, currencies);
-      const nowIso = new Date().toISOString();
-
-      let nextSupports = [...prev.supports];
-      let nextProjects = [...prev.projects];
-      let nextSavings = [...prev.savingsGoals];
-      let nextDebts = [...prev.debts];
-      let nextLoans = [...prev.internalLoans];
-      let nextInventory = [...(prev.inventoryItems ?? [])];
-
-      const adjustSupport = (supportId: string, deltaFbu: number) => {
-        nextSupports = nextSupports.map((s) => {
-          if (s.id !== supportId) return s;
-          const deltaInSupportCurr = convertFromFbu(deltaFbu, s.currency, currencies);
-          const nextBal = Math.round((s.balance + deltaInSupportCurr) * 100) / 100;
-          return { ...s, balance: nextBal };
-        });
-      };
-
-      if (input.type === TransactionType.INFLOW) {
-        adjustSupport(input.supportId, amountInFbu);
-      } else if (input.type === TransactionType.OUTFLOW) {
-        adjustSupport(input.supportId, -amountInFbu);
-      } else if (input.type === TransactionType.TRANSFER && input.targetSupportId) {
-        adjustSupport(input.supportId, -amountInFbu);
-        adjustSupport(input.targetSupportId, amountInFbu);
-      } else if (input.type === TransactionType.INTERNAL_LOAN && input.targetSupportId && input.projectId) {
-        adjustSupport(input.supportId, -amountInFbu);
-        adjustSupport(input.targetSupportId, amountInFbu);
-        const loan: InternalLoan = {
-          id: generateId('loan'),
-          projectId: input.projectId,
-          fromSupportId: input.supportId,
-          toSupportId: input.targetSupportId,
-          initialAmountFbu: amountInFbu,
-          remainingAmountFbu: amountInFbu,
-          date: input.date,
-          reminderDate: input.reminderDate || undefined,
-          reminderDelayDays: input.reminderDelayDays || undefined,
-          note: input.label || input.note,
-          status: 'active',
-          repayments: [],
-        };
-        nextLoans = [loan, ...nextLoans];
-      }
-
-      // Sync project tag if new
-      if (input.pocket === 'project' && input.projectId && input.categoryOrSource) {
-        const tag = input.categoryOrSource.trim();
-        nextProjects = nextProjects.map((p) => {
-          if (p.id !== input.projectId) return p;
-          if (input.type === TransactionType.INFLOW && !p.revenueSources.includes(tag)) {
-            return { ...p, revenueSources: [...p.revenueSources, tag] };
-          }
-          if (input.type === TransactionType.OUTFLOW && !p.expenseCategories.includes(tag)) {
-            return { ...p, expenseCategories: [...p.expenseCategories, tag] };
-          }
-          return p;
-        });
-      }
-
-      // Handle project inventory updates for stock purchase or stock-linked sale
-      let resolvedPurchaseLines: StockPurchaseLine[] | undefined;
-      let resolvedSaleLines: StockSaleLine[] | undefined;
-      let cogsFbu = 0;
-      let grossMarginFbu: number | undefined;
-
-      if (
-        input.pocket === 'project' &&
-        input.projectId &&
-        input.type === TransactionType.OUTFLOW &&
-        input.outflowNature === 'stock_purchase' &&
-        input.stockPurchaseLines &&
-        input.stockPurchaseLines.length > 0
-      ) {
-        resolvedPurchaseLines = input.stockPurchaseLines
-          .filter((line) => line.itemName.trim() && line.quantity > 0)
-          .map((line) => {
-            const cleanName = line.itemName.trim();
-            const lineTotalFbu = Math.max(0, Math.round(line.totalCostFbu || line.quantity * line.unitCostFbu));
-            const lineUnitFbu =
-              line.quantity > 0 ? Math.round(lineTotalFbu / line.quantity) : Math.round(line.unitCostFbu);
-
-            const idx = nextInventory.findIndex(
-              (item) =>
-                (line.itemId && item.id === line.itemId) ||
-                (item.projectId === input.projectId &&
-                  item.name.trim().toLowerCase() === cleanName.toLowerCase())
-            );
-
-            let resolvedId: string;
-            if (idx >= 0) {
-              const existing = nextInventory[idx];
-              const newQty = existing.quantity + line.quantity;
-              const newAvgCost =
-                newQty > 0
-                  ? Math.round(
-                      (Math.max(0, existing.quantity) * existing.averageUnitCostFbu + lineTotalFbu) /
-                        newQty
-                    )
-                  : lineUnitFbu;
-              nextInventory[idx] = {
-                ...existing,
-                unit: line.unit.trim() || existing.unit,
-                quantity: newQty,
-                averageUnitCostFbu: newAvgCost,
-                totalPurchasedQty: existing.totalPurchasedQty + line.quantity,
-                minStockThreshold:
-                  line.minStockThreshold !== undefined
-                    ? line.minStockThreshold
-                    : existing.minStockThreshold,
-                updatedAt: nowIso,
-              };
-              resolvedId = existing.id;
-            } else {
-              resolvedId = generateId('inv');
-              nextInventory = [
-                {
-                  id: resolvedId,
-                  projectId: input.projectId!,
-                  name: cleanName,
-                  unit: line.unit.trim() || 'pièce',
-                  quantity: line.quantity,
-                  minStockThreshold: line.minStockThreshold ?? 5,
-                  averageUnitCostFbu: lineUnitFbu,
-                  totalPurchasedQty: line.quantity,
-                  totalSoldQty: 0,
-                  totalSalesRevenueFbu: 0,
-                  totalCogsFbu: 0,
-                  updatedAt: nowIso,
-                },
-                ...nextInventory,
-              ];
-            }
-
-            return {
-              ...line,
-              itemId: resolvedId,
-              itemName: cleanName,
-              unit: line.unit.trim() || 'pièce',
-              unitCostFbu: lineUnitFbu,
-              totalCostFbu: lineTotalFbu,
-            };
-          });
-      }
-
-      if (
-        input.pocket === 'project' &&
-        input.projectId &&
-        input.type === TransactionType.INFLOW &&
-        input.stockSaleLines &&
-        input.stockSaleLines.length > 0
-      ) {
-        const preparedLines = input.stockSaleLines
-          .filter((l) => l.itemId && l.quantity > 0)
-          .map((l) => {
-            const inv = nextInventory.find((item) => item.id === l.itemId);
-            const unitCostFbu = inv ? inv.averageUnitCostFbu : l.unitCostFbu;
-            const totalCostFbu = Math.round(l.quantity * unitCostFbu);
-            return {
-              ...l,
-              itemName: inv?.name || l.itemName,
-              unit: inv?.unit || l.unit,
-              unitCostFbu,
-              totalCostFbu,
-            };
-          });
-
-        if (preparedLines.length > 0) {
-          resolvedSaleLines = preparedLines;
-          cogsFbu = preparedLines.reduce((acc, l) => acc + l.totalCostFbu, 0);
-          grossMarginFbu = amountInFbu - cogsFbu;
-
-          const totalWeight = cogsFbu > 0 ? cogsFbu : preparedLines.length;
-          nextInventory = nextInventory.map((item) => {
-            const matched = preparedLines.find((l) => l.itemId === item.id);
-            if (!matched) return item;
-            const revenueShare =
-              preparedLines.length === 1
-                ? amountInFbu
-                : cogsFbu > 0
-                ? Math.round((matched.totalCostFbu / totalWeight) * amountInFbu)
-                : Math.round(amountInFbu / preparedLines.length);
-            return {
-              ...item,
-              quantity: Math.max(0, item.quantity - matched.quantity),
-              totalSoldQty: item.totalSoldQty + matched.quantity,
-              totalCogsFbu: item.totalCogsFbu + matched.totalCostFbu,
-              totalSalesRevenueFbu: item.totalSalesRevenueFbu + revenueShare,
-              updatedAt: nowIso,
-            };
-          });
-        }
-      }
-
-      // Sync savings goal if selected
-      if (input.pocket === 'savings' && input.savingsGoalId) {
-        const delta = input.type === TransactionType.OUTFLOW ? -amountInFbu : amountInFbu;
-        nextSavings = nextSavings.map((g) =>
-          g.id === input.savingsGoalId
-            ? { ...g, currentAmountFbu: Math.max(0, g.currentAmountFbu + delta) }
-            : g
-        );
-      }
-
-      // Sync debt repayment if selected
-      if (input.pocket === 'debt' && input.debtId) {
-        nextDebts = nextDebts.map((d) => {
-          if (d.id !== input.debtId) return d;
-          const paid = Math.min(d.remainingAmountFbu, amountInFbu);
+    // Reverse stock purchases
+    if (oldTx.stockPurchaseLines && oldTx.stockPurchaseLines.length > 0) {
+      for (const line of oldTx.stockPurchaseLines) {
+        nextInventory = nextInventory.map((item) => {
+          const matches =
+            (line.itemId && item.id === line.itemId) ||
+            (oldTx.projectId &&
+              item.projectId === oldTx.projectId &&
+              item.name.trim().toLowerCase() === line.itemName.trim().toLowerCase());
+          if (!matches) return item;
+          const prevQty = Math.max(0, item.quantity - line.quantity);
+          const currentValue = Math.max(0, item.quantity) * item.averageUnitCostFbu;
+          const revertedValue = Math.max(0, currentValue - line.totalCostFbu);
+          const prevAvg =
+            prevQty > 0 ? Math.round(revertedValue / prevQty) : item.averageUnitCostFbu;
           return {
-            ...d,
-            remainingAmountFbu: Math.max(0, d.remainingAmountFbu - paid),
-            repayments: [
-              {
-                id: generateId('drep'),
-                amountFbu: paid,
-                date: input.date,
-                supportId: input.supportId,
-                note: input.label || input.note,
-              },
-              ...d.repayments,
-            ],
+            ...item,
+            quantity: prevQty,
+            averageUnitCostFbu: prevAvg,
+            totalPurchasedQty: Math.max(0, item.totalPurchasedQty - line.quantity),
+            updatedAt: nowIso,
           };
         });
       }
+    }
 
-      const account = prev.settings.account;
-      const authorName = account?.displayName?.trim() || 'Moi';
-      const authorRole: ProjectRole = targetProject?.sharedAccessRole ?? 'owner';
+    // Reverse stock-linked sales
+    if (oldTx.stockSaleLines && oldTx.stockSaleLines.length > 0) {
+      const totalCogs = oldTx.stockSaleLines.reduce((acc, l) => acc + l.totalCostFbu, 0);
+      const totalWeight = totalCogs > 0 ? totalCogs : oldTx.stockSaleLines.length;
+      nextInventory = nextInventory.map((item) => {
+        const matched = oldTx.stockSaleLines!.find((l) => l.itemId === item.id);
+        if (!matched) return item;
+        const revenueShare =
+          oldTx.stockSaleLines!.length === 1
+            ? oldTx.amountInFbu
+            : totalCogs > 0
+            ? Math.round((matched.totalCostFbu / totalWeight) * oldTx.amountInFbu)
+            : Math.round(oldTx.amountInFbu / oldTx.stockSaleLines!.length);
+        return {
+          ...item,
+          quantity: item.quantity + matched.quantity,
+          totalSoldQty: Math.max(0, item.totalSoldQty - matched.quantity),
+          totalCogsFbu: Math.max(0, item.totalCogsFbu - matched.totalCostFbu),
+          totalSalesRevenueFbu: Math.max(0, item.totalSalesRevenueFbu - revenueShare),
+          updatedAt: nowIso,
+        };
+      });
+    }
 
-      const tx: Transaction = {
-        id: generateId('tx'),
-        type: input.type,
-        pocket: input.pocket,
+    // Reverse savings pocket
+    if (oldTx.pocket === 'savings' && oldTx.savingsGoalId) {
+      const origDelta =
+        oldTx.type === TransactionType.OUTFLOW ? -oldTx.amountInFbu : oldTx.amountInFbu;
+      nextSavings = nextSavings.map((g) =>
+        g.id === oldTx.savingsGoalId
+          ? { ...g, currentAmountFbu: Math.max(0, g.currentAmountFbu - origDelta) }
+          : g
+      );
+    }
+
+    // Reverse debt repayment if recorded via QuickEntry
+    if (oldTx.pocket === 'debt' && oldTx.debtId) {
+      nextDebts = nextDebts.map((d) => {
+        if (d.id !== oldTx.debtId) return d;
+        const idx = d.repayments.findIndex(
+          (r) =>
+            r.date === oldTx.date &&
+            Math.abs(r.amountFbu - oldTx.amountInFbu) <= 1 &&
+            (r.supportId || '') === (oldTx.supportId || '')
+        );
+        if (idx < 0) return d;
+        const nextRepayments = d.repayments.filter((_, i) => i !== idx);
+        return recomputeDebt({ ...d, repayments: nextRepayments });
+      });
+    }
+
+    // Reverse internal loan created by INTERNAL_LOAN tx
+    if (oldTx.type === TransactionType.INTERNAL_LOAN) {
+      const idx = nextLoans.findIndex(
+        (l) =>
+          l.projectId === oldTx.projectId &&
+          l.fromSupportId === oldTx.supportId &&
+          l.toSupportId === oldTx.targetSupportId &&
+          l.date === oldTx.date &&
+          Math.abs(l.initialAmountFbu - oldTx.amountInFbu) <= 1
+      );
+      if (idx >= 0) {
+        nextLoans = nextLoans.filter((_, i) => i !== idx);
+      }
+    }
+
+    return {
+      ...prev,
+      supports: nextSupports,
+      savingsGoals: nextSavings,
+      debts: nextDebts,
+      internalLoans: nextLoans,
+      inventoryItems: nextInventory,
+    };
+  };
+
+  const applyQuickTransactionInput = (
+    prev: FinanceState,
+    input: QuickTransactionInput,
+    existingMeta?: { id: string; createdAt: string }
+  ): { nextState: FinanceState; tx: Transaction } => {
+    const { currencies } = prev.settings;
+    const targetProject =
+      input.pocket === 'project' && input.projectId
+        ? prev.projects.find((p) => p.id === input.projectId)
+        : undefined;
+
+    const amountInFbu = convertToFbu(input.amount, input.currency, currencies);
+    const nowIso = new Date().toISOString();
+
+    let nextSupports = [...prev.supports];
+    let nextProjects = [...prev.projects];
+    let nextSavings = [...prev.savingsGoals];
+    let nextDebts = [...prev.debts];
+    let nextLoans = [...prev.internalLoans];
+    let nextInventory = [...(prev.inventoryItems ?? [])];
+
+    const adjustSupport = (supportId: string, deltaFbu: number) => {
+      nextSupports = adjustSupportBalanceList(nextSupports, supportId, deltaFbu, currencies);
+    };
+
+    if (input.type === TransactionType.INFLOW) {
+      adjustSupport(input.supportId, amountInFbu);
+    } else if (input.type === TransactionType.OUTFLOW) {
+      adjustSupport(input.supportId, -amountInFbu);
+    } else if (input.type === TransactionType.TRANSFER && input.targetSupportId) {
+      adjustSupport(input.supportId, -amountInFbu);
+      adjustSupport(input.targetSupportId, amountInFbu);
+    } else if (
+      input.type === TransactionType.INTERNAL_LOAN &&
+      input.targetSupportId &&
+      input.projectId
+    ) {
+      adjustSupport(input.supportId, -amountInFbu);
+      adjustSupport(input.targetSupportId, amountInFbu);
+      const loan: InternalLoan = {
+        id: generateId('loan'),
         projectId: input.projectId,
-        savingsGoalId: input.savingsGoalId,
-        debtId: input.debtId,
-        supportId: input.supportId,
-        targetSupportId: input.targetSupportId,
-        amount: input.amount,
-        currency: input.currency,
-        amountInFbu,
-        paymentMethod: input.paymentMethod,
+        fromSupportId: input.supportId,
+        toSupportId: input.targetSupportId,
+        initialAmountFbu: amountInFbu,
+        remainingAmountFbu: amountInFbu,
         date: input.date,
-        label: input.label.trim() || 'Opération',
-        categoryOrSource: input.categoryOrSource,
-        note: input.note?.trim() || undefined,
-        outflowNature:
-          input.pocket === 'project' && input.type === TransactionType.OUTFLOW
-            ? input.outflowNature || 'operating_expense'
-            : undefined,
-        stockPurchaseLines: resolvedPurchaseLines,
-        stockSaleLines: resolvedSaleLines,
-        cogsFbu: resolvedSaleLines ? cogsFbu : undefined,
-        grossMarginFbu,
-        authorName,
-        authorInitials: getInitials(authorName),
-        authorRole,
-        createdAt: nowIso,
+        reminderDate: input.reminderDate || undefined,
+        reminderDelayDays: input.reminderDelayDays || undefined,
+        note: input.label || input.note,
+        status: 'active',
+        repayments: [],
       };
+      nextLoans = [loan, ...nextLoans];
+    }
 
-      const nextQueue: SharedProjectSyncOp[] =
-        targetProject?.isShared && targetProject.id
-          ? [
-              ...(prev.pendingSyncQueue ?? []),
+    // Sync project tag if new
+    if (input.pocket === 'project' && input.projectId && input.categoryOrSource) {
+      const tag = input.categoryOrSource.trim();
+      nextProjects = nextProjects.map((p) => {
+        if (p.id !== input.projectId) return p;
+        if (input.type === TransactionType.INFLOW && !p.revenueSources.includes(tag)) {
+          return { ...p, revenueSources: [...p.revenueSources, tag] };
+        }
+        if (input.type === TransactionType.OUTFLOW && !p.expenseCategories.includes(tag)) {
+          return { ...p, expenseCategories: [...p.expenseCategories, tag] };
+        }
+        return p;
+      });
+    }
+
+    // Handle project inventory updates for stock purchase or stock-linked sale
+    let resolvedPurchaseLines: StockPurchaseLine[] | undefined;
+    let resolvedSaleLines: StockSaleLine[] | undefined;
+    let cogsFbu = 0;
+    let grossMarginFbu: number | undefined;
+
+    if (
+      input.pocket === 'project' &&
+      input.projectId &&
+      input.type === TransactionType.OUTFLOW &&
+      input.outflowNature === 'stock_purchase' &&
+      input.stockPurchaseLines &&
+      input.stockPurchaseLines.length > 0
+    ) {
+      resolvedPurchaseLines = input.stockPurchaseLines
+        .filter((line) => line.itemName.trim() && line.quantity > 0)
+        .map((line) => {
+          const cleanName = line.itemName.trim();
+          const lineTotalFbu = Math.max(
+            0,
+            Math.round(line.totalCostFbu || line.quantity * line.unitCostFbu)
+          );
+          const lineUnitFbu =
+            line.quantity > 0
+              ? Math.round(lineTotalFbu / line.quantity)
+              : Math.round(line.unitCostFbu);
+
+          const idx = nextInventory.findIndex(
+            (item) =>
+              (line.itemId && item.id === line.itemId) ||
+              (item.projectId === input.projectId &&
+                item.name.trim().toLowerCase() === cleanName.toLowerCase())
+          );
+
+          let resolvedId: string;
+          if (idx >= 0) {
+            const existing = nextInventory[idx];
+            const newQty = existing.quantity + line.quantity;
+            const newAvgCost =
+              newQty > 0
+                ? Math.round(
+                    (Math.max(0, existing.quantity) * existing.averageUnitCostFbu +
+                      lineTotalFbu) /
+                      newQty
+                  )
+                : lineUnitFbu;
+            nextInventory[idx] = {
+              ...existing,
+              unit: line.unit.trim() || existing.unit,
+              quantity: newQty,
+              averageUnitCostFbu: newAvgCost,
+              totalPurchasedQty: existing.totalPurchasedQty + line.quantity,
+              minStockThreshold:
+                line.minStockThreshold !== undefined
+                  ? line.minStockThreshold
+                  : existing.minStockThreshold,
+              updatedAt: nowIso,
+            };
+            resolvedId = existing.id;
+          } else {
+            resolvedId = generateId('inv');
+            nextInventory = [
               {
-                id: generateId('sync'),
-                projectId: targetProject.id,
-                kind: 'insert_transaction',
-                payload: tx,
-                createdAt: nowIso,
+                id: resolvedId,
+                projectId: input.projectId!,
+                name: cleanName,
+                unit: line.unit.trim() || 'pièce',
+                quantity: line.quantity,
+                minStockThreshold: line.minStockThreshold ?? 5,
+                averageUnitCostFbu: lineUnitFbu,
+                totalPurchasedQty: line.quantity,
+                totalSoldQty: 0,
+                totalSalesRevenueFbu: 0,
+                totalCogsFbu: 0,
+                updatedAt: nowIso,
               },
-            ]
-          : prev.pendingSyncQueue ?? [];
+              ...nextInventory,
+            ];
+          }
 
-      return {
+          return {
+            ...line,
+            itemId: resolvedId,
+            itemName: cleanName,
+            unit: line.unit.trim() || 'pièce',
+            unitCostFbu: lineUnitFbu,
+            totalCostFbu: lineTotalFbu,
+          };
+        });
+    }
+
+    if (
+      input.pocket === 'project' &&
+      input.projectId &&
+      input.type === TransactionType.INFLOW &&
+      input.stockSaleLines &&
+      input.stockSaleLines.length > 0
+    ) {
+      const preparedLines = input.stockSaleLines
+        .filter((l) => l.itemId && l.quantity > 0)
+        .map((l) => {
+          const inv = nextInventory.find((item) => item.id === l.itemId);
+          const unitCostFbu = inv ? inv.averageUnitCostFbu : l.unitCostFbu;
+          const totalCostFbu = Math.round(l.quantity * unitCostFbu);
+          return {
+            ...l,
+            itemName: inv?.name || l.itemName,
+            unit: inv?.unit || l.unit,
+            unitCostFbu,
+            totalCostFbu,
+          };
+        });
+
+      if (preparedLines.length > 0) {
+        resolvedSaleLines = preparedLines;
+        cogsFbu = preparedLines.reduce((acc, l) => acc + l.totalCostFbu, 0);
+        grossMarginFbu = amountInFbu - cogsFbu;
+
+        const totalWeight = cogsFbu > 0 ? cogsFbu : preparedLines.length;
+        nextInventory = nextInventory.map((item) => {
+          const matched = preparedLines.find((l) => l.itemId === item.id);
+          if (!matched) return item;
+          const revenueShare =
+            preparedLines.length === 1
+              ? amountInFbu
+              : cogsFbu > 0
+              ? Math.round((matched.totalCostFbu / totalWeight) * amountInFbu)
+              : Math.round(amountInFbu / preparedLines.length);
+          return {
+            ...item,
+            quantity: Math.max(0, item.quantity - matched.quantity),
+            totalSoldQty: item.totalSoldQty + matched.quantity,
+            totalCogsFbu: item.totalCogsFbu + matched.totalCostFbu,
+            totalSalesRevenueFbu: item.totalSalesRevenueFbu + revenueShare,
+            updatedAt: nowIso,
+          };
+        });
+      }
+    }
+
+    // Sync savings goal if selected
+    if (input.pocket === 'savings' && input.savingsGoalId) {
+      const delta = input.type === TransactionType.OUTFLOW ? -amountInFbu : amountInFbu;
+      nextSavings = nextSavings.map((g) =>
+        g.id === input.savingsGoalId
+          ? { ...g, currentAmountFbu: Math.max(0, g.currentAmountFbu + delta) }
+          : g
+      );
+    }
+
+    // Sync debt repayment if selected
+    if (input.pocket === 'debt' && input.debtId) {
+      nextDebts = nextDebts.map((d) => {
+        if (d.id !== input.debtId) return d;
+        const paid = Math.min(d.remainingAmountFbu, amountInFbu);
+        return recomputeDebt({
+          ...d,
+          repayments: [
+            {
+              id: generateId('drep'),
+              amountFbu: paid,
+              date: input.date,
+              supportId: input.supportId,
+              note: input.label || input.note,
+            },
+            ...d.repayments,
+          ],
+        });
+      });
+    }
+
+    const account = prev.settings.account;
+    const authorName = account?.displayName?.trim() || 'Moi';
+    const authorRole: ProjectRole = targetProject?.sharedAccessRole ?? 'owner';
+
+    const tx: Transaction = {
+      id: existingMeta?.id || generateId('tx'),
+      type: input.type,
+      pocket: input.pocket,
+      projectId: input.projectId,
+      savingsGoalId: input.savingsGoalId,
+      debtId: input.debtId,
+      supportId: input.supportId,
+      targetSupportId: input.targetSupportId,
+      amount: input.amount,
+      currency: input.currency,
+      amountInFbu,
+      paymentMethod: input.paymentMethod,
+      date: input.date,
+      label: input.label.trim() || 'Opération',
+      categoryOrSource: input.categoryOrSource,
+      note: input.note?.trim() || undefined,
+      outflowNature:
+        input.pocket === 'project' && input.type === TransactionType.OUTFLOW
+          ? input.outflowNature || 'operating_expense'
+          : undefined,
+      stockPurchaseLines: resolvedPurchaseLines,
+      stockSaleLines: resolvedSaleLines,
+      cogsFbu: resolvedSaleLines ? cogsFbu : undefined,
+      grossMarginFbu,
+      authorName,
+      authorInitials: getInitials(authorName),
+      authorRole,
+      createdAt: existingMeta?.createdAt || nowIso,
+    };
+
+    const nextQueue: SharedProjectSyncOp[] =
+      targetProject?.isShared && targetProject.id
+        ? [
+            ...(prev.pendingSyncQueue ?? []),
+            {
+              id: generateId('sync'),
+              projectId: targetProject.id,
+              kind: 'insert_transaction',
+              payload: tx,
+              createdAt: nowIso,
+            },
+          ]
+        : prev.pendingSyncQueue ?? [];
+
+    return {
+      tx,
+      nextState: {
         ...prev,
         supports: nextSupports,
         projects: nextProjects,
@@ -1068,7 +1512,60 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savingsGoals: nextSavings,
         debts: nextDebts,
         internalLoans: nextLoans,
+      },
+    };
+  };
+
+  const addQuickTransaction = (input: QuickTransactionInput) => {
+    setState((prev) => {
+      const targetProject =
+        input.pocket === 'project' && input.projectId
+          ? prev.projects.find((p) => p.id === input.projectId)
+          : undefined;
+      if (targetProject?.sharedAccessRole === 'viewer') return prev;
+
+      const { nextState, tx } = applyQuickTransactionInput(prev, input);
+      return {
+        ...nextState,
         transactions: [tx, ...prev.transactions],
+      };
+    });
+  };
+
+  const updateQuickTransaction: FinanceContextValue['updateQuickTransaction'] = (
+    txId,
+    input
+  ) => {
+    setState((prev) => {
+      const oldTx = prev.transactions.find((t) => t.id === txId);
+      if (!oldTx) return prev;
+
+      if (oldTx.projectId) {
+        const oldProj = prev.projects.find((p) => p.id === oldTx.projectId);
+        if (oldProj?.sharedAccessRole === 'viewer') return prev;
+      }
+      if (input.pocket === 'project' && input.projectId) {
+        const newProj = prev.projects.find((p) => p.id === input.projectId);
+        if (newProj?.sharedAccessRole === 'viewer') return prev;
+      }
+
+      const reverted = reverseTransactionEffects(prev, oldTx);
+      const { nextState, tx: updatedTx } = applyQuickTransactionInput(reverted, input, {
+        id: oldTx.id,
+        createdAt: oldTx.createdAt,
+      });
+
+      const mergedTx: Transaction = {
+        ...updatedTx,
+        authorUserId: oldTx.authorUserId ?? updatedTx.authorUserId,
+        authorName: oldTx.authorName || updatedTx.authorName,
+        authorInitials: oldTx.authorInitials || updatedTx.authorInitials,
+        authorRole: oldTx.authorRole ?? updatedTx.authorRole,
+      };
+
+      return {
+        ...nextState,
+        transactions: prev.transactions.map((t) => (t.id === txId ? mergedTx : t)),
       };
     });
   };
@@ -1076,14 +1573,16 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const deleteTransaction = (id: string) => {
     setState((prev) => {
       const target = prev.transactions.find((t) => t.id === id);
-      if (target?.projectId) {
+      if (!target) return prev;
+      if (target.projectId) {
         const proj = prev.projects.find((p) => p.id === target.projectId);
         if (proj?.sharedAccessRole && proj.sharedAccessRole !== 'owner') {
           return prev;
         }
       }
+      const reverted = reverseTransactionEffects(prev, target);
       return {
-        ...prev,
+        ...reverted,
         transactions: prev.transactions.filter((t) => t.id !== id),
       };
     });
@@ -1115,6 +1614,66 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       reminderDelayDays,
       label: note?.trim() || `Prêt interne vers ${project?.name ?? 'Projet'}`,
       note,
+    });
+  };
+
+  const updateInternalLoan: FinanceContextValue['updateInternalLoan'] = (loanId, patch) => {
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const loan = prev.internalLoans.find((l) => l.id === loanId);
+      if (!loan) return prev;
+      const proj = prev.projects.find((p) => p.id === loan.projectId);
+      if (proj?.sharedAccessRole && proj.sharedAccessRole !== 'owner') return prev;
+
+      const nextInitial =
+        patch.initialAmountFbu !== undefined && patch.initialAmountFbu > 0
+          ? Math.round(patch.initialAmountFbu)
+          : loan.initialAmountFbu;
+      const deltaInitial = nextInitial - loan.initialAmountFbu;
+      const repaidTotal = loan.repayments.reduce((s, r) => s + r.amountFbu, 0);
+      const nextRemaining = Math.max(0, nextInitial - repaidTotal);
+
+      let nextSupports = prev.supports;
+      if (deltaInitial !== 0) {
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          loan.fromSupportId,
+          -deltaInitial,
+          currencies
+        );
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          loan.toSupportId,
+          deltaInitial,
+          currencies
+        );
+      }
+
+      const nextLoans = prev.internalLoans.map((l) =>
+        l.id === loanId
+          ? {
+              ...l,
+              initialAmountFbu: nextInitial,
+              remainingAmountFbu: nextRemaining,
+              status: (nextRemaining <= 0 ? 'repaid' : 'active') as 'active' | 'repaid',
+              note: patch.note !== undefined ? patch.note.trim() || undefined : l.note,
+              reminderDate:
+                patch.reminderDate !== undefined
+                  ? patch.reminderDate || undefined
+                  : l.reminderDate,
+              reminderDelayDays:
+                patch.reminderDelayDays !== undefined
+                  ? patch.reminderDelayDays || undefined
+                  : l.reminderDelayDays,
+            }
+          : l
+      );
+
+      return {
+        ...prev,
+        supports: nextSupports,
+        internalLoans: nextLoans,
+      };
     });
   };
 
@@ -1193,6 +1752,14 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const addDebt: FinanceContextValue['addDebt'] = (input) => {
+    const firstEntry: DebtEntry = {
+      id: generateId('dent'),
+      amountFbu: input.initialAmountFbu,
+      currency: input.currency,
+      date: input.date,
+      supportId: input.supportId || undefined,
+      note: input.note?.trim() || undefined,
+    };
     const debt: DebtItem = {
       id: generateId(input.direction === 'debt' ? 'debt' : 'rec'),
       direction: input.direction,
@@ -1203,12 +1770,198 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       date: input.date,
       dueDate: input.dueDate || undefined,
       note: input.note?.trim() || undefined,
+      entries: [firstEntry],
       repayments: [],
     };
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      let nextSupports = prev.supports;
+      if (input.supportId) {
+        const deltaFbu =
+          input.direction === 'debt' ? input.initialAmountFbu : -input.initialAmountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          input.supportId,
+          deltaFbu,
+          currencies
+        );
+      }
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: [debt, ...prev.debts],
+      };
+    });
+  };
+
+  const addDebtEntry: FinanceContextValue['addDebtEntry'] = ({
+    debtId,
+    amountFbu,
+    currency,
+    date,
+    note,
+    supportId,
+  }) => {
+    if (amountFbu <= 0) return;
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const target = prev.debts.find((d) => d.id === debtId);
+      if (!target) return prev;
+
+      const newEntry: DebtEntry = {
+        id: generateId('dent'),
+        amountFbu: Math.round(amountFbu),
+        currency: currency || target.currency,
+        date,
+        supportId: supportId || undefined,
+        note: note?.trim() || undefined,
+      };
+
+      const nextDebts = prev.debts.map((d) => {
+        if (d.id !== debtId) return d;
+        const existingEntries = normalizeDebtEntries(d);
+        return recomputeDebt(d, [newEntry, ...existingEntries]);
+      });
+
+      let nextSupports = prev.supports;
+      if (supportId) {
+        const deltaFbu = target.direction === 'debt' ? amountFbu : -amountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          supportId,
+          deltaFbu,
+          currencies
+        );
+      }
+
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: nextDebts,
+      };
+    });
+  };
+
+  const updateDebt: FinanceContextValue['updateDebt'] = (debtId, patch) => {
     setState((prev) => ({
       ...prev,
-      debts: [debt, ...prev.debts],
+      debts: prev.debts.map((d) => {
+        if (d.id !== debtId) return d;
+        const updated: DebtItem = {
+          ...d,
+          personName:
+            patch.personName !== undefined
+              ? patch.personName.trim() || d.personName
+              : d.personName,
+          direction: patch.direction ?? d.direction,
+          dueDate:
+            patch.dueDate !== undefined ? patch.dueDate || undefined : d.dueDate,
+          note: patch.note !== undefined ? patch.note.trim() || undefined : d.note,
+          currency: patch.currency || d.currency,
+        };
+        return recomputeDebt(updated);
+      }),
     }));
+  };
+
+  const updateDebtEntry: FinanceContextValue['updateDebtEntry'] = (
+    debtId,
+    entryId,
+    patch
+  ) => {
+    if (patch.amountFbu <= 0) return;
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const target = prev.debts.find((d) => d.id === debtId);
+      if (!target) return prev;
+
+      const entries = normalizeDebtEntries(target);
+      const oldEntry = entries.find((e) => e.id === entryId);
+      if (!oldEntry) return prev;
+
+      let nextSupports = prev.supports;
+      // Reverse old entry support impact
+      if (oldEntry.supportId) {
+        const reverseDelta =
+          target.direction === 'debt' ? -oldEntry.amountFbu : oldEntry.amountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          oldEntry.supportId,
+          reverseDelta,
+          currencies
+        );
+      }
+      // Apply new entry support impact
+      const nextSupportId =
+        patch.supportId !== undefined ? patch.supportId || undefined : oldEntry.supportId;
+      const cleanAmt = Math.round(patch.amountFbu);
+      if (nextSupportId) {
+        const applyDelta = target.direction === 'debt' ? cleanAmt : -cleanAmt;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          nextSupportId,
+          applyDelta,
+          currencies
+        );
+      }
+
+      const nextEntries = entries.map((e) =>
+        e.id === entryId
+          ? {
+              ...e,
+              amountFbu: cleanAmt,
+              date: patch.date || e.date,
+              note: patch.note !== undefined ? patch.note.trim() || undefined : e.note,
+              supportId: nextSupportId,
+            }
+          : e
+      );
+
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: prev.debts.map((d) => (d.id === debtId ? recomputeDebt(d, nextEntries) : d)),
+      };
+    });
+  };
+
+  const deleteDebtEntry: FinanceContextValue['deleteDebtEntry'] = (debtId, entryId) => {
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const target = prev.debts.find((d) => d.id === debtId);
+      if (!target) return prev;
+
+      const entries = normalizeDebtEntries(target);
+      const oldEntry = entries.find((e) => e.id === entryId);
+      if (!oldEntry) return prev;
+
+      let nextSupports = prev.supports;
+      if (oldEntry.supportId) {
+        const reverseDelta =
+          target.direction === 'debt' ? -oldEntry.amountFbu : oldEntry.amountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          oldEntry.supportId,
+          reverseDelta,
+          currencies
+        );
+      }
+
+      const nextEntries = entries.filter((e) => e.id !== entryId);
+      if (nextEntries.length === 0) {
+        return {
+          ...prev,
+          supports: nextSupports,
+          debts: prev.debts.filter((d) => d.id !== debtId),
+        };
+      }
+
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: prev.debts.map((d) => (d.id === debtId ? recomputeDebt(d, nextEntries) : d)),
+      };
+    });
   };
 
   const repayDebt: FinanceContextValue['repayDebt'] = ({
@@ -1224,23 +1977,24 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const targetDebt = prev.debts.find((d) => d.id === debtId);
       if (!targetDebt) return prev;
 
-      const applied = Math.min(targetDebt.remainingAmountFbu, amountFbu);
+      const applied = Math.min(targetDebt.remainingAmountFbu, Math.round(amountFbu));
+      if (applied <= 0) return prev;
+
       const nextDebts = prev.debts.map((d) => {
         if (d.id !== debtId) return d;
-        return {
+        return recomputeDebt({
           ...d,
-          remainingAmountFbu: Math.max(0, d.remainingAmountFbu - applied),
           repayments: [
             {
               id: generateId('drep'),
               amountFbu: applied,
               date,
-              supportId,
+              supportId: supportId || undefined,
               note: note?.trim() || undefined,
             },
             ...d.repayments,
           ],
-        };
+        });
       });
 
       let nextSupports = prev.supports;
@@ -1248,11 +2002,12 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (supportId) {
         const deltaFbu = targetDebt.direction === 'debt' ? -applied : applied;
-        nextSupports = prev.supports.map((s) => {
-          if (s.id !== supportId) return s;
-          const delta = convertFromFbu(deltaFbu, s.currency, currencies);
-          return { ...s, balance: Math.round((s.balance + delta) * 100) / 100 };
-        });
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          supportId,
+          deltaFbu,
+          currencies
+        );
 
         const tx: Transaction = {
           id: generateId('tx'),
@@ -1287,6 +2042,101 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
+  const updateDebtRepayment: FinanceContextValue['updateDebtRepayment'] = (
+    debtId,
+    repaymentId,
+    patch
+  ) => {
+    if (patch.amountFbu <= 0) return;
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const targetDebt = prev.debts.find((d) => d.id === debtId);
+      if (!targetDebt) return prev;
+      const oldRep = targetDebt.repayments.find((r) => r.id === repaymentId);
+      if (!oldRep) return prev;
+
+      const cleanAmt = Math.round(patch.amountFbu);
+      let nextSupports = prev.supports;
+
+      if (oldRep.supportId) {
+        const revDelta =
+          targetDebt.direction === 'debt' ? oldRep.amountFbu : -oldRep.amountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          oldRep.supportId,
+          revDelta,
+          currencies
+        );
+      }
+
+      const nextSupportId =
+        patch.supportId !== undefined ? patch.supportId || undefined : oldRep.supportId;
+      if (nextSupportId) {
+        const applyDelta = targetDebt.direction === 'debt' ? -cleanAmt : cleanAmt;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          nextSupportId,
+          applyDelta,
+          currencies
+        );
+      }
+
+      const nextRepayments = targetDebt.repayments.map((r) =>
+        r.id === repaymentId
+          ? {
+              ...r,
+              amountFbu: cleanAmt,
+              date: patch.date || r.date,
+              supportId: nextSupportId,
+              note: patch.note !== undefined ? patch.note.trim() || undefined : r.note,
+            }
+          : r
+      );
+
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: prev.debts.map((d) =>
+          d.id === debtId ? recomputeDebt({ ...d, repayments: nextRepayments }) : d
+        ),
+      };
+    });
+  };
+
+  const deleteDebtRepayment: FinanceContextValue['deleteDebtRepayment'] = (
+    debtId,
+    repaymentId
+  ) => {
+    setState((prev) => {
+      const { currencies } = prev.settings;
+      const targetDebt = prev.debts.find((d) => d.id === debtId);
+      if (!targetDebt) return prev;
+      const oldRep = targetDebt.repayments.find((r) => r.id === repaymentId);
+      if (!oldRep) return prev;
+
+      let nextSupports = prev.supports;
+      if (oldRep.supportId) {
+        const revDelta =
+          targetDebt.direction === 'debt' ? oldRep.amountFbu : -oldRep.amountFbu;
+        nextSupports = adjustSupportBalanceList(
+          nextSupports,
+          oldRep.supportId,
+          revDelta,
+          currencies
+        );
+      }
+
+      const nextRepayments = targetDebt.repayments.filter((r) => r.id !== repaymentId);
+      return {
+        ...prev,
+        supports: nextSupports,
+        debts: prev.debts.map((d) =>
+          d.id === debtId ? recomputeDebt({ ...d, repayments: nextRepayments }) : d
+        ),
+      };
+    });
+  };
+
   const deleteDebt = (id: string) => {
     setState((prev) => ({
       ...prev,
@@ -1308,6 +2158,25 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setState((prev) => ({
       ...prev,
       savingsGoals: [goal, ...prev.savingsGoals],
+    }));
+  };
+
+  const updateSavingsGoal: FinanceContextValue['updateSavingsGoal'] = (id, patch) => {
+    setState((prev) => ({
+      ...prev,
+      savingsGoals: prev.savingsGoals.map((g) =>
+        g.id === id
+          ? {
+              ...g,
+              name: patch.name.trim() || g.name,
+              targetAmountFbu: Math.max(1, Math.round(patch.targetAmountFbu)),
+              currentAmountFbu: Math.max(0, Math.round(patch.currentAmountFbu)),
+              note: patch.note !== undefined ? patch.note.trim() || undefined : g.note,
+              deadline:
+                patch.deadline !== undefined ? patch.deadline || undefined : g.deadline,
+            }
+          : g
+      ),
     }));
   };
 
@@ -1410,7 +2279,48 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!parsed || !parsed.settings || !Array.isArray(parsed.supports)) {
         return { ok: false, error: 'Format JSON TOMI invalide.' };
       }
-      setState(normalizeLoadedState(parsed));
+      const normalized = normalizeLoadedState(parsed);
+      setState((prev) => {
+        const currentNs = activeNamespaceRef.current;
+        if (currentNs.startsWith('user:') && prev.settings.account?.remoteUserId) {
+          return {
+            ...normalized,
+            settings: {
+              ...normalized.settings,
+              account: {
+                ...DEFAULT_ACCOUNT_SECURITY,
+                ...(normalized.settings.account ?? {}),
+                mode: 'cloud_ready',
+                remoteUserId: prev.settings.account.remoteUserId,
+                email: prev.settings.account.email,
+                displayName:
+                  normalized.settings.account?.displayName ||
+                  prev.settings.account.displayName ||
+                  DEFAULT_ACCOUNT_SECURITY.displayName,
+                cloudProviderLabel: 'Supabase',
+              },
+            },
+          };
+        }
+        return {
+          ...normalized,
+          settings: {
+            ...normalized.settings,
+            account: {
+              ...DEFAULT_ACCOUNT_SECURITY,
+              ...(normalized.settings.account ?? {}),
+              mode:
+                normalized.settings.account?.mode === 'cloud_ready'
+                  ? 'local_profile'
+                  : normalized.settings.account?.mode || 'local_profile',
+              displayName:
+                normalized.settings.account?.displayName ||
+                DEFAULT_ACCOUNT_SECURITY.displayName,
+              remoteUserId: undefined,
+            },
+          },
+        };
+      });
       return { ok: true };
     } catch {
       return { ok: false, error: 'Impossible de lire ce fichier JSON.' };
@@ -1418,11 +2328,63 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const resetToStarter = () => {
-    setState(createStarterFinanceState());
+    setState((prev) => {
+      const starter = createStarterFinanceState();
+      const currentNs = activeNamespaceRef.current;
+      if (currentNs.startsWith('user:') && prev.settings.account?.remoteUserId) {
+        return {
+          ...starter,
+          settings: {
+            ...starter.settings,
+            account: prev.settings.account,
+          },
+        };
+      }
+      return {
+        ...starter,
+        settings: {
+          ...starter.settings,
+          account: {
+            ...(prev.settings.account ?? DEFAULT_ACCOUNT_SECURITY),
+            mode:
+              prev.settings.account?.mode === 'cloud_ready'
+                ? 'local_profile'
+                : prev.settings.account?.mode || 'local_profile',
+            remoteUserId: undefined,
+          },
+        },
+      };
+    });
   };
 
   const resetToEmpty = () => {
-    setState(EMPTY_FINANCE_STATE);
+    setState((prev) => {
+      const empty = createCleanRemoteState();
+      const currentNs = activeNamespaceRef.current;
+      if (currentNs.startsWith('user:') && prev.settings.account?.remoteUserId) {
+        return {
+          ...empty,
+          settings: {
+            ...empty.settings,
+            account: prev.settings.account,
+          },
+        };
+      }
+      return {
+        ...empty,
+        settings: {
+          ...empty.settings,
+          account: {
+            ...(prev.settings.account ?? DEFAULT_ACCOUNT_SECURITY),
+            mode:
+              prev.settings.account?.mode === 'cloud_ready'
+                ? 'local_profile'
+                : prev.settings.account?.mode || 'local_profile',
+            remoteUserId: undefined,
+          },
+        },
+      };
+    });
   };
 
   const lockApp = () => {
@@ -1488,66 +2450,192 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }));
   };
 
-  // Connexion à distance (ex: téléphone d'un ami) & récupération des données utilisateur
-  const loginRemoteAccount = async (
-    email: string,
-    password: string
-  ): Promise<{ ok: boolean; message: string }> => {
-    try {
-      const { signInOrSignUpRemote, pullFinanceStateFromCloud, pushFinanceStateToCloud } =
-        await import('../utils/cloudSync');
-      await signInOrSignUpRemote(email, password);
+  // Helper commun pour basculer atomiquement vers l'espace isolé du compte authentifié
+  const completeRemoteSessionSwitch = async (
+    user: { id: string; email?: string; user_metadata?: Record<string, unknown> },
+    fallbackEmail: string,
+    displayNameOverride?: string
+  ): Promise<void> => {
+    const {
+      pullFinanceStateFromCloud,
+      pushFinanceStateToCloud,
+      fetchUserSharedProjectsRemote,
+    } = await import('../utils/cloudSync');
 
-      const remotePayload = await pullFinanceStateFromCloud();
-      if (remotePayload && remotePayload.stateJson) {
-        const restored = normalizeLoadedState(
-          remotePayload.stateJson as Partial<FinanceState>
-        );
-        const syncedState: FinanceState = {
-          ...restored,
-          settings: {
-            ...restored.settings,
-            account: {
-              ...DEFAULT_ACCOUNT_SECURITY,
-              ...(restored.settings.account ?? {}),
-              mode: 'cloud_ready',
-              email: email.trim().toLowerCase(),
-              cloudProviderLabel: 'Supabase',
-            },
-          },
-        };
-        setState(syncedState);
-        void refreshPushNotifications();
-        void syncPushTokenWithSupabase();
+    // 1. Sauvegarde immédiate de l'espace actuel avant bascule pour protéger le Profil Local
+    const prevNs = activeNamespaceRef.current;
+    const flushPayload = {
+      updatedAt: localUpdatedAtRef.current || new Date().toISOString(),
+      state,
+    };
+    writeToLocalStorage(flushPayload, prevNs);
+    await writeToIndexedDb(flushPayload, prevNs);
+
+    // 2. Lecture de l'éventuel cache déjà présent pour CE même user_id + récupération Cloud
+    const targetNs = getUserNamespace(user.id);
+    const cachedLs = readFromLocalStorage(targetNs);
+    const cachedIdb = await readFromIndexedDb(targetNs);
+    const bestUserCache =
+      cachedLs && cachedIdb
+        ? cachedLs.updatedAt >= cachedIdb.updatedAt
+          ? cachedLs
+          : cachedIdb
+        : cachedLs || cachedIdb;
+
+    const [remotePayload, sharedBundles] = await Promise.all([
+      pullFinanceStateFromCloud(),
+      fetchUserSharedProjectsRemote().catch(() => []),
+    ]);
+
+    let baseState: FinanceState;
+    let resolvedUpdatedAt = new Date().toISOString();
+    const hasRemoteData = Boolean(remotePayload && remotePayload.stateJson);
+
+    if (hasRemoteData && remotePayload) {
+      const remoteNormalized = normalizeLoadedState(
+        remotePayload.stateJson as Partial<FinanceState>
+      );
+      if (bestUserCache && bestUserCache.updatedAt > remotePayload.updatedAt) {
+        baseState = normalizeLoadedState(bestUserCache.state);
+        resolvedUpdatedAt = bestUserCache.updatedAt;
+      } else {
+        baseState = remoteNormalized;
+        resolvedUpdatedAt = remotePayload.updatedAt || resolvedUpdatedAt;
+      }
+    } else if (bestUserCache) {
+      baseState = normalizeLoadedState(bestUserCache.state);
+      resolvedUpdatedAt = bestUserCache.updatedAt;
+    } else {
+      // Nouveau compte vierge : jamais d'importation automatique des données du Profil Local de l'appareil hôte
+      baseState = createCleanRemoteState();
+    }
+
+    // Fusionne les projets partagés appartenant à ce user_id
+    if (sharedBundles.length > 0) {
+      const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
+        const map = new Map(existing.map((e) => [e.id, e]));
+        for (const item of incoming) map.set(item.id, item);
+        return Array.from(map.values());
+      };
+      let nextProjects = baseState.projects;
+      let nextSupports = baseState.supports;
+      let nextInventory = baseState.inventoryItems ?? [];
+      let nextMembers = baseState.projectMembers ?? [];
+      let nextTxs = baseState.transactions;
+
+      for (const b of sharedBundles) {
+        nextProjects = mergeById(nextProjects, [b.project]);
+        nextSupports = mergeById(nextSupports, b.supports);
+        nextInventory = mergeById(nextInventory, b.inventory);
+        nextMembers = mergeById(nextMembers, b.members);
+        nextTxs = mergeById(nextTxs, b.transactions);
+      }
+
+      baseState = {
+        ...baseState,
+        projects: nextProjects,
+        supports: nextSupports,
+        inventoryItems: nextInventory,
+        projectMembers: nextMembers,
+        transactions: nextTxs.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      };
+    }
+
+    const metadataName =
+      typeof user.user_metadata?.display_name === 'string'
+        ? user.user_metadata.display_name.trim()
+        : '';
+    const existingName =
+      baseState.settings.account?.displayName &&
+      baseState.settings.account.displayName !== 'Mode Invité (Local)'
+        ? baseState.settings.account.displayName.trim()
+        : '';
+    const cleanEmail = (user.email || fallbackEmail).trim().toLowerCase();
+    const resolvedDisplayName =
+      displayNameOverride?.trim() ||
+      existingName ||
+      metadataName ||
+      cleanEmail.split('@')[0] ||
+      'Compte Connecté';
+
+    const nextState: FinanceState = {
+      ...baseState,
+      settings: {
+        ...baseState.settings,
+        account: {
+          ...DEFAULT_ACCOUNT_SECURITY,
+          ...(baseState.settings.account ?? {}),
+          mode: 'cloud_ready',
+          remoteUserId: user.id,
+          displayName: resolvedDisplayName,
+          email: cleanEmail,
+          cloudProviderLabel: 'Supabase',
+          localProfileConfirmedAt: undefined,
+        },
+      },
+    };
+
+    // 3. Bascule atomique vers le namespace isolé du compte
+    setActiveStorageNamespace(targetNs);
+    activeNamespaceRef.current = targetNs;
+    localUpdatedAtRef.current = resolvedUpdatedAt;
+    hadLocalRef.current = true;
+    setActiveNamespace(targetNs);
+    setState(nextState);
+    setIsLocked(false);
+
+    const payloadToSave = { updatedAt: resolvedUpdatedAt, state: nextState };
+    writeToLocalStorage(payloadToSave, targetNs);
+    await writeToIndexedDb(payloadToSave, targetNs);
+
+    if (!hasRemoteData && navigator.onLine) {
+      try {
+        await pushFinanceStateToCloud(nextState);
+      } catch {
+        // Auto-sync reprendra dès que possible
+      }
+    }
+
+    void refreshPushNotifications();
+    void syncPushTokenWithSupabase();
+  };
+
+  // Connexion par e-mail + mot de passe dans un espace isolé dédié (sans toucher au Profil Local)
+  const loginRemoteAccount: FinanceContextValue['loginRemoteAccount'] = async (
+    email,
+    password
+  ) => {
+    try {
+      const { signInRemote, RemoteAuthError } = await import('../utils/cloudSync');
+      try {
+        const authRes = await signInRemote(email, password);
+        if (!authRes.hasSession || authRes.needsEmailConfirmation) {
+          return {
+            ok: false,
+            needsEmailConfirmation: true,
+            errorCode: 'email_not_confirmed',
+            message:
+              'Votre adresse e-mail doit être confirmée avant de charger vos données. Consultez votre boîte mail ou renvoyez l’e-mail de confirmation.',
+          };
+        }
+
+        await completeRemoteSessionSwitch(authRes.user, email);
         return {
           ok: true,
-          message: 'Compte connecté et données chargées sur cet appareil.',
+          message:
+            'Compte connecté et données chargées dans votre espace privé (le profil local de cet appareil reste intact).',
         };
+      } catch (err) {
+        if (err instanceof RemoteAuthError) {
+          return {
+            ok: false,
+            errorCode: err.code,
+            needsEmailConfirmation: err.code === 'email_not_confirmed',
+            message: err.message,
+          };
+        }
+        throw err;
       }
-
-      const nextState: FinanceState = {
-        ...state,
-        settings: {
-          ...state.settings,
-          account: {
-            ...DEFAULT_ACCOUNT_SECURITY,
-            ...(state.settings.account ?? {}),
-            mode: 'cloud_ready',
-            email: email.trim().toLowerCase(),
-            cloudProviderLabel: 'Supabase',
-          },
-        },
-      };
-      setState(nextState);
-      if (navigator.onLine) {
-        await pushFinanceStateToCloud(nextState);
-      }
-      void refreshPushNotifications();
-      void syncPushTokenWithSupabase();
-      return {
-        ok: true,
-        message: 'Compte connecté. Vos données seront synchronisées dès détection réseau.',
-      };
     } catch (err) {
       return {
         ok: false,
@@ -1559,8 +2647,103 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   };
 
-  // Déconnexion & nettoyage des données sur un appareil emprunté
+  // Création d'un nouveau compte Cloud isolé
+  const registerRemoteAccount: FinanceContextValue['registerRemoteAccount'] = async (
+    email,
+    password,
+    displayName
+  ) => {
+    try {
+      const { signUpRemote, RemoteAuthError } = await import('../utils/cloudSync');
+      try {
+        const authRes = await signUpRemote(email, password, displayName);
+        if (!authRes.hasSession || authRes.needsEmailConfirmation) {
+          return {
+            ok: false,
+            needsEmailConfirmation: true,
+            errorCode: 'email_not_confirmed',
+            message:
+              'Compte créé ! Un e-mail de confirmation vient d’être envoyé. Validez le lien dans votre boîte mail (et vérifiez vos spams) puis connectez-vous.',
+          };
+        }
+
+        await completeRemoteSessionSwitch(authRes.user, email, displayName);
+        return {
+          ok: true,
+          message:
+            'Compte créé et activé dans son propre espace isolé sur cet appareil.',
+        };
+      } catch (err) {
+        if (err instanceof RemoteAuthError) {
+          return {
+            ok: false,
+            errorCode: err.code,
+            needsEmailConfirmation: err.code === 'email_not_confirmed',
+            message: err.message,
+          };
+        }
+        throw err;
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Impossible de créer le compte pour le moment.',
+      };
+    }
+  };
+
+  const resendRemoteConfirmation: FinanceContextValue['resendRemoteConfirmation'] = async (
+    email
+  ) => {
+    try {
+      const { resendConfirmationEmailRemote } = await import('../utils/cloudSync');
+      await resendConfirmationEmailRemote(email);
+      return {
+        ok: true,
+        message:
+          'E-mail de confirmation renvoyé ! Vérifiez votre boîte de réception et vos spams.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Impossible de renvoyer l’e-mail de confirmation.',
+      };
+    }
+  };
+
+  // Déconnexion propre : purge uniquement les caches locaux du compte connecté et restaure le Profil Local intact
   const logoutRemoteAccount = async (): Promise<void> => {
+    const currentNs = activeNamespaceRef.current;
+    const remoteUserId =
+      state.settings.account?.remoteUserId ||
+      (currentNs.startsWith('user:') ? currentNs.slice(5) : null);
+
+    // Sauvegarde finale best-effort vers le cloud avant suppression du cache local de ce compte
+    if (
+      remoteUserId &&
+      currentNs === getUserNamespace(remoteUserId) &&
+      navigator.onLine &&
+      isSupabaseConfigured
+    ) {
+      try {
+        const { getCurrentRemoteUser, pushFinanceStateToCloud } = await import(
+          '../utils/cloudSync'
+        );
+        const currentUser = await getCurrentRemoteUser();
+        if (currentUser && currentUser.id === remoteUserId) {
+          await pushFinanceStateToCloud(state);
+        }
+      } catch {
+        // Ignore si réseau indisponible
+      }
+    }
+
     await removeCachedPushTokenFromSupabase();
     try {
       const { signOutRemote } = await import('../utils/cloudSync');
@@ -1568,39 +2751,105 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } catch {
       // Ignore si hors ligne lors de la déconnexion
     }
-    setState({
-      ...EMPTY_FINANCE_STATE,
-      settings: {
-        ...EMPTY_FINANCE_STATE.settings,
-        account: {
-          ...DEFAULT_ACCOUNT_SECURITY,
-          mode: 'local_profile',
-          displayName: '',
-          email: undefined,
-          cloudProviderLabel: undefined,
-          cloudSyncUrl: undefined,
+
+    // Supprime uniquement les données locales du compte qui vient de se déconnecter
+    if (remoteUserId) {
+      await clearAccountLocalCache(remoteUserId);
+    }
+
+    // Restaure intact l'espace 'local' de l'appareil
+    const localLs = readFromLocalStorage('local');
+    const localIdb = await readFromIndexedDb('local');
+    const bestLocal =
+      localLs && localIdb
+        ? localLs.updatedAt >= localIdb.updatedAt
+          ? localLs
+          : localIdb
+        : localLs || localIdb;
+
+    let restoredLocalState: FinanceState;
+    if (bestLocal) {
+      const normalized = normalizeLoadedState(bestLocal.state);
+      const localMode =
+        normalized.settings.account?.mode === 'cloud_ready'
+          ? 'local_profile'
+          : normalized.settings.account?.mode || 'local_profile';
+      restoredLocalState = {
+        ...normalized,
+        settings: {
+          ...normalized.settings,
+          account: {
+            ...DEFAULT_ACCOUNT_SECURITY,
+            ...(normalized.settings.account ?? {}),
+            mode: localMode,
+            remoteUserId: undefined,
+          },
         },
-      },
-    });
-    setIsLocked(false);
+      };
+    } else {
+      restoredLocalState = {
+        ...createStarterFinanceState(),
+        settings: {
+          ...createStarterFinanceState().settings,
+          account: {
+            ...DEFAULT_ACCOUNT_SECURITY,
+            mode: 'local_profile',
+            remoteUserId: undefined,
+          },
+        },
+      };
+    }
+
+    setActiveStorageNamespace('local');
+    activeNamespaceRef.current = 'local';
+    localUpdatedAtRef.current = bestLocal?.updatedAt || new Date(0).toISOString();
+    hadLocalRef.current = Boolean(bestLocal);
+    setActiveNamespace('local');
+    setState(restoredLocalState);
+    setIsLocked(
+      Boolean(
+        restoredLocalState.settings.account?.pinEnabled &&
+          restoredLocalState.settings.account?.pinHash
+      )
+    );
   };
 
-  // Synchronisation automatique dès qu'une connexion réseau mobile/Wi-Fi est détectée (mode Compte Connecté)
+  // Synchronisation automatique Cloud strictement limitée à l'utilisateur authentifié correspondant
   useEffect(() => {
-    const isCloudMode = state.settings.account?.mode === 'cloud_ready';
-    if (!isCloudMode) return;
+    const remoteUid = state.settings.account?.remoteUserId;
+    const isCloudMode =
+      state.settings.account?.mode === 'cloud_ready' &&
+      Boolean(remoteUid) &&
+      activeNamespace.startsWith('user:') &&
+      activeNamespace === getUserNamespace(remoteUid!);
+    if (!isCloudMode || !remoteUid) return;
 
+    const expectedNs = activeNamespace;
     let cancelled = false;
     let unsubscribeReconnect: (() => void) | undefined;
 
     void (async () => {
-      const { onNetworkReconnect, pushFinanceStateToCloud } = await import(
-        '../utils/cloudSync'
-      );
+      const { onNetworkReconnect, pushFinanceStateToCloud, getCurrentRemoteUser } =
+        await import('../utils/cloudSync');
 
       const attemptSync = async () => {
-        if (cancelled || !navigator.onLine) return;
+        if (
+          cancelled ||
+          !navigator.onLine ||
+          activeNamespaceRef.current !== expectedNs
+        ) {
+          return;
+        }
         try {
+          const authUser = await getCurrentRemoteUser();
+          if (
+            cancelled ||
+            !authUser ||
+            authUser.id !== remoteUid ||
+            activeNamespaceRef.current !== expectedNs
+          ) {
+            return;
+          }
           await pushFinanceStateToCloud(state);
         } catch {
           // Reste sécurisé en local si échec réseau temporaire
@@ -1620,7 +2869,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       cancelled = true;
       if (unsubscribeReconnect) unsubscribeReconnect();
     };
-  }, [state]);
+  }, [state, activeNamespace]);
 
   // Ref pour garder la trace idempotente des transactions déjà reçues
   const knownTxIdsRef = useRef<Set<string>>(new Set(state.transactions.map((t) => t.id)));
@@ -2424,6 +3673,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     addProjectTag,
     getProjectRole,
     upsertInventoryItem,
+    updateInventoryItem,
     updateInventoryThreshold,
     deleteInventoryItem,
     enableProjectSharing,
@@ -2433,13 +3683,22 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     joinSharedProjectByCode,
     syncSharedProjectsNow,
     addQuickTransaction,
+    updateQuickTransaction,
     deleteTransaction,
     createInternalLoan,
+    updateInternalLoan,
     repayInternalLoan,
     addDebt,
+    addDebtEntry,
+    updateDebt,
+    updateDebtEntry,
+    deleteDebtEntry,
     repayDebt,
+    updateDebtRepayment,
+    deleteDebtRepayment,
     deleteDebt,
     addSavingsGoal,
+    updateSavingsGoal,
     adjustSavingsGoal,
     deleteSavingsGoal,
     sendChatMessage,
@@ -2449,6 +3708,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     importJson,
     resetToStarter,
     resetToEmpty,
+    activeNamespace,
     isLocked,
     lockApp,
     unlockApp,
@@ -2457,6 +3717,8 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     disablePinLock,
     updateAccountProfile,
     loginRemoteAccount,
+    registerRemoteAccount,
+    resendRemoteConfirmation,
     logoutRemoteAccount,
     privacyMode,
     shakeEnabled,

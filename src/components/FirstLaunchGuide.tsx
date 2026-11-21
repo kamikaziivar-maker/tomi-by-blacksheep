@@ -1,4 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { haptics } from '../utils/haptics';
 
 const STORAGE_KEY = 'tomi_onboarding_completed_v1';
@@ -19,17 +24,34 @@ const STEPS = [
 ];
 
 interface FirstLaunchGuideProps {
+  isOpen?: boolean;
   onFinish: () => void;
 }
 
-export const FirstLaunchGuide: React.FC<FirstLaunchGuideProps> = ({ onFinish }) => {
+export const FirstLaunchGuide: React.FC<FirstLaunchGuideProps> = ({
+  isOpen = true,
+  onFinish,
+}) => {
   const [stepIndex, setStepIndex] = useState(0);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
 
   const completeGuide = async () => {
     await haptics.success();
     localStorage.setItem(STORAGE_KEY, 'true');
     onFinish();
   };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        localStorage.setItem(STORAGE_KEY, 'true');
+        onFinish();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onFinish]);
 
   const handleNext = async () => {
     await haptics.tap();
@@ -40,11 +62,26 @@ export const FirstLaunchGuide: React.FC<FirstLaunchGuideProps> = ({ onFinish }) 
     }
   };
 
+  if (!shouldRender) return null;
+
   const current = STEPS[stepIndex];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Guide de démarrage"
+      onClick={() => void completeGuide()}
+      className={`fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl ${sheetMotionClass(
+          isVisible
+        )}`}
+      >
         <div className="flex items-center justify-between text-xs text-zinc-400 mb-2">
           <span>GUIDE DE DÉMARRAGE</span>
           <span>
@@ -58,7 +95,7 @@ export const FirstLaunchGuide: React.FC<FirstLaunchGuideProps> = ({ onFinish }) 
         <div className="mt-5 flex items-center justify-between gap-3">
           <button
             type="button"
-            onClick={completeGuide}
+            onClick={() => void completeGuide()}
             className="px-3 py-2 text-xs text-zinc-400 hover:text-zinc-200"
           >
             Passer
@@ -66,7 +103,7 @@ export const FirstLaunchGuide: React.FC<FirstLaunchGuideProps> = ({ onFinish }) 
 
           <button
             type="button"
-            onClick={handleNext}
+            onClick={() => void handleNext()}
             className="rounded-xl bg-[#F5B971] px-4 py-2 text-sm font-semibold text-black hover:opacity-95"
           >
             {stepIndex < STEPS.length - 1 ? 'Suivant' : 'Compris'}

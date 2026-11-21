@@ -1,5 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Banknote, Landmark, Plus, Smartphone, Trash2, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { useFinance } from '../store/FinanceContext';
 import { Project, ProjectCategory, SupportType } from '../types/finance';
 import {
@@ -49,6 +54,8 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
   editingProject,
 }) => {
   const { state, addProject, updateProject } = useFinance();
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
+  const prevSessionKeyRef = useRef<string | null>(null);
 
   const [name, setName] = useState('');
   const [category, setCategory] = useState<string>(ProjectCategory.BUSINESS);
@@ -72,7 +79,14 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
   ]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      prevSessionKeyRef.current = null;
+      return;
+    }
+    const sessionKey = editingProject ? `edit:${editingProject.id}` : 'new';
+    if (prevSessionKeyRef.current === sessionKey) return;
+    prevSessionKeyRef.current = sessionKey;
+
     if (editingProject) {
       setName(editingProject.name);
       setCategory(editingProject.category);
@@ -95,7 +109,18 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
     setNewExpense('');
   }, [isOpen, editingProject]);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  if (!shouldRender) return null;
 
   const handleAddSource = () => {
     const clean = newSource.trim();
@@ -163,12 +188,20 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4"
+      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
       role="dialog"
       aria-modal="true"
       aria-label={editingProject ? 'Modifier le projet' : 'Nouveau projet'}
+      onClick={onClose}
     >
-      <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#141417] p-5 pb-7 shadow-2xl">
+      <div
+        className={`w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#141417] p-5 pb-7 shadow-2xl ${sheetMotionClass(
+          isVisible
+        )}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-display text-lg font-bold text-zinc-100">

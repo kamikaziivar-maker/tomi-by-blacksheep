@@ -5,6 +5,7 @@ import {
   ArrowLeftRight,
   ArrowUpRight,
   Boxes,
+  Check,
   Clock,
   Lock,
   Package,
@@ -26,11 +27,14 @@ import { SupportAvatar } from '../components/SupportAvatar';
 import { SupportPicker } from '../components/SupportPicker';
 import { useFinance } from '../store/FinanceContext';
 import {
+  InternalLoan,
+  InventoryItem,
   PocketTarget,
   Project,
   ProjectOutflowNature,
   ProjectRole,
   SupportType,
+  Transaction,
   TransactionType,
 } from '../types/finance';
 import {
@@ -46,11 +50,12 @@ import { haptics } from '../utils/haptics';
 interface ProjectsViewProps {
   onOpenProjectForm: (project?: Project) => void;
   onOpenQuickEntry: (opts: {
-    pocket: PocketTarget;
-    projectId: string;
-    type: TransactionType;
+    pocket?: PocketTarget;
+    projectId?: string;
+    type?: TransactionType;
     outflowNature?: ProjectOutflowNature;
     stockItemId?: string;
+    editingTransaction?: Transaction;
   }) => void;
   onOpenSupportManager: (
     ownerType: 'personal' | 'project',
@@ -77,9 +82,12 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
     metrics,
     persistenceStatus,
     createInternalLoan,
+    updateInternalLoan,
     repayInternalLoan,
     deleteProject,
+    deleteTransaction,
     upsertInventoryItem,
+    updateInventoryItem,
     updateInventoryThreshold,
     deleteInventoryItem,
     syncSharedProjectsNow,
@@ -106,6 +114,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
     'overview'
   );
   const [txFilter, setTxFilter] = useState<'all' | 'inflow' | 'outflow'>('all');
+  const [confirmDeleteTxId, setConfirmDeleteTxId] = useState<string | null>(null);
 
   // Collaboration modal state
   const [collabOpen, setCollabOpen] = useState(false);
@@ -124,6 +133,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   );
   const [thresholdInput, setThresholdInput] = useState('');
 
+  const [editingInvItemId, setEditingInvItemId] = useState<string | null>(null);
+  const [editInvName, setEditInvName] = useState('');
+  const [editInvUnit, setEditInvUnit] = useState('pièce');
+  const [editInvQty, setEditInvQty] = useState('');
+  const [editInvCost, setEditInvCost] = useState('');
+  const [editInvThreshold, setEditInvThreshold] = useState('5');
+
   // Internal Loan modal/inline panel state
   const [loanProjectId, setLoanProjectId] = useState<string | null>(null);
   const [loanAmount, setLoanAmount] = useState('');
@@ -133,6 +149,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   const [loanNote, setLoanNote] = useState('');
   const [loanReminderDate, setLoanReminderDate] = useState('');
   const [loanReminderDelayDays, setLoanReminderDelayDays] = useState('');
+
+  // Edit internal loan inline state
+  const [editingLoanId, setEditingLoanId] = useState<string | null>(null);
+  const [editLoanAmountFbu, setEditLoanAmountFbu] = useState('');
+  const [editLoanNote, setEditLoanNote] = useState('');
+  const [editLoanReminderDate, setEditLoanReminderDate] = useState('');
+  const [editLoanDelayDays, setEditLoanDelayDays] = useState('');
 
   // Repay internal loan inline state
   const [repayLoanId, setRepayLoanId] = useState<string | null>(null);
@@ -234,6 +257,63 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
     setStockUnitCost('');
     setStockMinThreshold('5');
     setShowAddStock(false);
+  };
+
+  const startEditInventoryItem = (item: InventoryItem) => {
+    void haptics.tap();
+    setEditingInvItemId(item.id);
+    setEditInvName(item.name);
+    setEditInvUnit(item.unit);
+    setEditInvQty(String(item.quantity));
+    setEditInvCost(String(item.averageUnitCostFbu));
+    setEditInvThreshold(String(item.minStockThreshold));
+    setEditingThresholdId(null);
+  };
+
+  const handleSaveEditInventoryItem = async (
+    e: React.FormEvent,
+    itemId: string
+  ) => {
+    e.preventDefault();
+    const qty = Math.max(0, parseFloat(editInvQty.replace(',', '.')) || 0);
+    const cost = Math.max(0, parseFloat(editInvCost.replace(',', '.')) || 0);
+    const thr = parseFloat(editInvThreshold.replace(',', '.'));
+    if (!editInvName.trim()) return;
+    updateInventoryItem(itemId, {
+      name: editInvName.trim(),
+      unit: editInvUnit.trim() || 'pièce',
+      quantity: qty,
+      averageUnitCostFbu: cost,
+      minStockThreshold: Number.isNaN(thr) ? 5 : Math.max(0, thr),
+    });
+    await haptics.success();
+    setEditingInvItemId(null);
+  };
+
+  const startEditLoan = (loan: InternalLoan) => {
+    void haptics.tap();
+    setEditingLoanId(loan.id);
+    setEditLoanAmountFbu(String(loan.initialAmountFbu));
+    setEditLoanNote(loan.note || '');
+    setEditLoanReminderDate(loan.reminderDate || '');
+    setEditLoanDelayDays(
+      loan.reminderDelayDays ? String(loan.reminderDelayDays) : ''
+    );
+    setRepayLoanId(null);
+  };
+
+  const handleSaveEditLoan = async (e: React.FormEvent, loanId: string) => {
+    e.preventDefault();
+    const amt = parseFloat(editLoanAmountFbu.replace(',', '.'));
+    const delay = parseInt(editLoanDelayDays, 10);
+    updateInternalLoan(loanId, {
+      initialAmountFbu: !Number.isNaN(amt) && amt > 0 ? amt : undefined,
+      note: editLoanNote,
+      reminderDate: editLoanReminderDate,
+      reminderDelayDays: !Number.isNaN(delay) && delay > 0 ? delay : undefined,
+    });
+    await haptics.success();
+    setEditingLoanId(null);
   };
 
   const handleManualSync = async () => {
@@ -769,56 +849,159 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 {projLoans.map((loan) => (
                   <div
                     key={loan.id}
-                    className="flex flex-wrap items-center justify-between gap-2 text-xs"
+                    className="space-y-2 border-t border-amber-500/15 pt-2 first:border-t-0 first:pt-0"
                   >
-                    <div>
-                      <span className="text-zinc-200 font-medium">
-                        {loan.note || 'Avance Compte Perso'}
-                      </span>
-                      <span className="text-zinc-500">
-                        {' '}
-                        · {formatShortDate(loan.date)}
-                      </span>
-                      <div className="font-mono-num text-[#F5B971] mt-0.5">
-                        Restant à rembourser : {fmt(loan.remainingAmountFbu)} /{' '}
-                        {fmt(loan.initialAmountFbu)}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div>
+                        <span className="text-zinc-200 font-medium">
+                          {loan.note || 'Avance Compte Perso'}
+                        </span>
+                        <span className="text-zinc-500">
+                          {' '}
+                          · {formatShortDate(loan.date)}
+                          {loan.reminderDate
+                            ? ` · Rappel ${formatShortDate(loan.reminderDate)}`
+                            : loan.reminderDelayDays
+                            ? ` · Délai ${loan.reminderDelayDays}j`
+                            : ''}
+                        </span>
+                        <div className="font-mono-num text-[#F5B971] mt-0.5">
+                          Restant à rembourser : {fmt(loan.remainingAmountFbu)} /{' '}
+                          {fmt(loan.initialAmountFbu)}
+                        </div>
                       </div>
+
+                      {repayLoanId === loan.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            placeholder={String(loan.remainingAmountFbu)}
+                            value={repayAmountFbu}
+                            onChange={(e) => setRepayAmountFbu(e.target.value)}
+                            className="h-9 w-28 rounded-lg border border-zinc-700 bg-[#0D0D0F] px-2 font-mono-num text-xs text-zinc-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleConfirmRepayLoan(
+                                loan.id,
+                                loan.remainingAmountFbu,
+                                proj.id
+                              )
+                            }
+                            className="h-9 rounded-lg bg-[#10B981] px-3 text-xs font-bold text-[#0D0D0F]"
+                          >
+                            Valider
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRepayLoanId(null)}
+                            className="h-9 px-2 text-xs text-zinc-400"
+                          >
+                            Annuler
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => startEditLoan(loan)}
+                            aria-label="Modifier ce prêt interne"
+                            title="Corriger le prêt interne"
+                            className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-700 bg-[#18181B] text-zinc-300 hover:border-[#F5B971] hover:text-[#F5B971]"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingLoanId(null);
+                              setRepayLoanId(loan.id);
+                              setRepayAmountFbu(String(loan.remainingAmountFbu));
+                            }}
+                            className="h-9 rounded-lg border border-zinc-700 bg-[#18181B] px-3 text-xs font-semibold text-zinc-100 hover:border-[#10B981]"
+                          >
+                            Rembourser le Perso
+                          </button>
+                        </div>
+                      )}
                     </div>
 
-                    {repayLoanId === loan.id ? (
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          placeholder={String(loan.remainingAmountFbu)}
-                          value={repayAmountFbu}
-                          onChange={(e) => setRepayAmountFbu(e.target.value)}
-                          className="h-9 w-28 rounded-lg border border-zinc-700 bg-[#0D0D0F] px-2 font-mono-num text-xs text-zinc-100"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleConfirmRepayLoan(
-                              loan.id,
-                              loan.remainingAmountFbu,
-                              proj.id
-                            )
-                          }
-                          className="h-9 rounded-lg bg-[#10B981] px-3 text-xs font-bold text-[#0D0D0F]"
-                        >
-                          Valider
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setRepayLoanId(loan.id);
-                          setRepayAmountFbu(String(loan.remainingAmountFbu));
-                        }}
-                        className="h-9 rounded-lg border border-zinc-700 bg-[#18181B] px-3 text-xs font-semibold text-zinc-100 hover:border-[#10B981]"
+                    {editingLoanId === loan.id && (
+                      <form
+                        onSubmit={(e) => void handleSaveEditLoan(e, loan.id)}
+                        className="rounded-lg border border-zinc-800 bg-[#0D0D0F] p-2.5 space-y-2"
                       >
-                        Rembourser le Perso
-                      </button>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <div>
+                            <label className="mb-0.5 block text-[10px] text-zinc-400">
+                              Montant initial (FBU)
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              step="any"
+                              value={editLoanAmountFbu}
+                              onChange={(e) => setEditLoanAmountFbu(e.target.value)}
+                              className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2.5 font-mono-num text-xs text-zinc-100"
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[10px] text-zinc-400">
+                              Motif / note
+                            </label>
+                            <input
+                              type="text"
+                              value={editLoanNote}
+                              onChange={(e) => setEditLoanNote(e.target.value)}
+                              className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs text-zinc-100"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <div>
+                            <label className="mb-0.5 block text-[10px] text-zinc-400">
+                              Date de rappel
+                            </label>
+                            <CustomDatePicker
+                              value={editLoanReminderDate}
+                              onChange={(val) => setEditLoanReminderDate(val)}
+                              label="Date de rappel"
+                              placeholder="Aucun rappel"
+                              clearable
+                              className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs text-zinc-100"
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[10px] text-zinc-400">
+                              Délai (jours)
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              placeholder="Ex: 14"
+                              value={editLoanDelayDays}
+                              onChange={(e) => setEditLoanDelayDays(e.target.value)}
+                              className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2.5 font-mono-num text-xs text-zinc-100"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingLoanId(null)}
+                            className="h-8 px-2.5 text-xs text-zinc-400"
+                          >
+                            Annuler
+                          </button>
+                          <button
+                            type="submit"
+                            className="h-8 rounded-lg bg-[#F5B971] px-3 text-xs font-bold text-[#0D0D0F]"
+                          >
+                            Enregistrer
+                          </button>
+                        </div>
+                      </form>
                     )}
                   </div>
                 ))}
@@ -1036,17 +1219,62 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                             </div>
                           </div>
                         </div>
-                        <div
-                          className={`font-mono-num text-sm font-semibold shrink-0 ${
-                            isIn
-                              ? 'text-[#10B981]'
-                              : isStockPurchase
-                              ? 'text-[#F5B971]'
-                              : 'text-zinc-200'
-                          }`}
-                        >
-                          {isIn ? '+' : '-'}
-                          {fmt(tx.amountInFbu)}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <div
+                            className={`font-mono-num text-sm font-semibold ${
+                              isIn
+                                ? 'text-[#10B981]'
+                                : isStockPurchase
+                                ? 'text-[#F5B971]'
+                                : 'text-zinc-200'
+                            }`}
+                          >
+                            {isIn ? '+' : '-'}
+                            {fmt(tx.amountInFbu)}
+                          </div>
+                          {canWrite && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConfirmDeleteTxId(null);
+                                onOpenQuickEntry({ editingTransaction: tx });
+                              }}
+                              aria-label={`Corriger ${tx.label}`}
+                              title="Corriger l’opération"
+                              className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-[#F5B971]"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {isOwner &&
+                            (confirmDeleteTxId === tx.id ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void haptics.warning();
+                                  deleteTransaction(tx.id);
+                                  setConfirmDeleteTxId(null);
+                                }}
+                                aria-label="Confirmer la suppression"
+                                className="inline-flex h-8 items-center gap-1 rounded-lg bg-[#EF4444] px-2 text-[10px] font-bold text-white"
+                              >
+                                <Check className="h-3 w-3" />
+                                <span>Suppr.</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void haptics.tap();
+                                  setConfirmDeleteTxId(tx.id);
+                                }}
+                                aria-label={`Supprimer ${tx.label}`}
+                                title="Supprimer et annuler l’opération"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-800 hover:text-[#EF4444]"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            ))}
                         </div>
                       </div>
                     );
@@ -1305,7 +1533,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                         </div>
 
                         {canWrite && (
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             {editingThresholdId === item.id ? (
                               <div className="flex items-center gap-1">
                                 <input
@@ -1362,6 +1590,17 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                               + Réappro
                             </button>
 
+                            <button
+                              type="button"
+                              onClick={() => startEditInventoryItem(item)}
+                              aria-label={`Modifier ${item.name}`}
+                              title="Corriger l’article"
+                              className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-[#141417] px-2 py-1 text-[11px] text-zinc-300 hover:border-[#F5B971] hover:text-[#F5B971]"
+                            >
+                              <Pencil className="h-3 w-3" />
+                              <span>Modifier</span>
+                            </button>
+
                             {isOwner && (
                               <button
                                 type="button"
@@ -1375,6 +1614,94 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                           </div>
                         )}
                       </div>
+
+                      {editingInvItemId === item.id && canWrite && (
+                        <form
+                          onSubmit={(e) =>
+                            void handleSaveEditInventoryItem(e, item.id)
+                          }
+                          className="mt-2 rounded-xl border border-[#F5B971]/40 bg-[#141417] p-3 space-y-2.5"
+                        >
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            <input
+                              type="text"
+                              required
+                              placeholder="Nom du produit"
+                              value={editInvName}
+                              onChange={(e) => setEditInvName(e.target.value)}
+                              className="h-9 rounded-lg border border-zinc-800 bg-[#0D0D0F] px-2.5 text-xs text-zinc-100"
+                            />
+                            <CustomSelect
+                              value={editInvUnit}
+                              onChange={(val) => setEditInvUnit(val)}
+                              title="Unité de stock"
+                              searchable={false}
+                              options={UNIT_OPTIONS.map((u) => ({
+                                value: u,
+                                label: `Unité : ${u}`,
+                              }))}
+                              className="h-9 w-full rounded-lg border border-zinc-800 bg-[#0D0D0F] px-2.5 text-xs text-zinc-100"
+                            />
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <label className="mb-0.5 block text-[10px] text-zinc-400">
+                                Quantité
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={editInvQty}
+                                onChange={(e) => setEditInvQty(e.target.value)}
+                                className="h-9 w-full rounded-lg border border-zinc-800 bg-[#0D0D0F] px-2 font-mono-num text-xs text-zinc-100"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-0.5 block text-[10px] text-zinc-400">
+                                Coût / u (FBU)
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={editInvCost}
+                                onChange={(e) => setEditInvCost(e.target.value)}
+                                className="h-9 w-full rounded-lg border border-zinc-800 bg-[#0D0D0F] px-2 font-mono-num text-xs text-zinc-100"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-0.5 block text-[10px] text-zinc-400">
+                                Seuil alerte
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={editInvThreshold}
+                                onChange={(e) =>
+                                  setEditInvThreshold(e.target.value)
+                                }
+                                className="h-9 w-full rounded-lg border border-zinc-800 bg-[#0D0D0F] px-2 font-mono-num text-xs text-zinc-100"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setEditingInvItemId(null)}
+                              className="h-8 px-2.5 text-xs text-zinc-400"
+                            >
+                              Annuler
+                            </button>
+                            <button
+                              type="submit"
+                              className="h-8 rounded-lg bg-[#F5B971] px-3 text-xs font-bold text-[#0D0D0F]"
+                            >
+                              Enregistrer
+                            </button>
+                          </div>
+                        </form>
+                      )}
                     </div>
                   );
                 })}
@@ -1490,6 +1817,19 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                             </div>
                           </div>
                         </div>
+                        {canWrite && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onOpenQuickEntry({ editingTransaction: tx })
+                            }
+                            aria-label={`Corriger ${tx.label}`}
+                            title="Corriger l’opération"
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-[#F5B971]"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     );
                   })}

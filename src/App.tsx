@@ -19,6 +19,11 @@ import { ProjectFormModal } from './components/ProjectFormModal';
 import { QuickEntryModal } from './components/QuickEntryModal';
 import { SplashScreen } from './components/SplashScreen';
 import { SupportManagerModal } from './components/SupportManagerModal';
+import {
+  backdropMotionClass,
+  dialogMotionClass,
+  useAnimatedVisibility,
+} from './hooks/useAnimatedVisibility';
 import { useShakeDetector } from './hooks/useShakeDetector';
 import { FinanceProvider, useFinance } from './store/FinanceContext';
 import {
@@ -26,6 +31,7 @@ import {
   PocketTarget,
   Project,
   ProjectOutflowNature,
+  Transaction,
   TransactionType,
 } from './types/finance';
 import { haptics } from './utils/haptics';
@@ -63,6 +69,7 @@ function AppShell() {
   const [showSplash, setShowSplash] = useState(true);
   const [showFirstGuide, setShowFirstGuide] = useState(false);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+  const exitModalAnim = useAnimatedVisibility(exitConfirmOpen);
   const [activeTab, setActiveTab] = useState<NavTab>('home');
 
   // Quick Entry modal state
@@ -73,6 +80,7 @@ function AppShell() {
     type?: TransactionType;
     outflowNature?: ProjectOutflowNature;
     stockItemId?: string;
+    editingTransaction?: Transaction;
   }>({});
 
   // Project Form modal state
@@ -228,6 +236,7 @@ function AppShell() {
     type?: TransactionType;
     outflowNature?: ProjectOutflowNature;
     stockItemId?: string;
+    editingTransaction?: Transaction;
   }) => {
     void haptics.tap();
     setQuickDefaults(opts ?? {});
@@ -274,16 +283,17 @@ function AppShell() {
         />
       )}
 
-      {!showSplash && !isLocked && showFirstGuide && (
-        <FirstLaunchGuide onFinish={() => setShowFirstGuide(false)} />
-      )}
+      <FirstLaunchGuide
+        isOpen={!showSplash && !isLocked && showFirstGuide}
+        onFinish={() => setShowFirstGuide(false)}
+      />
 
       {/* Discreet Toast for Privacy / Discret Mode */}
       {privacyToast && (
         <div
           role="status"
           aria-live="polite"
-          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 flex items-center gap-2 rounded-xl border border-[#F5B971]/40 bg-[#141417]/95 px-4 py-2 text-xs font-semibold text-[#F5B971] shadow-xl backdrop-blur-md whitespace-nowrap"
+          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 flex items-center gap-2 rounded-xl border border-[#F5B971]/40 bg-[#141417]/95 px-4 py-2 text-xs font-semibold text-[#F5B971] shadow-xl backdrop-blur-md whitespace-nowrap tomi-toast-enter"
         >
           {privacyMode ? (
             <EyeOff className="h-3.5 w-3.5 shrink-0" />
@@ -308,7 +318,7 @@ function AppShell() {
           }}
           role="status"
           aria-live="polite"
-          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 w-[92%] max-w-sm flex items-start gap-2.5 rounded-2xl border border-[#F5B971]/50 bg-[#121318]/95 px-4 py-3 text-left shadow-2xl backdrop-blur-md transition-all"
+          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 w-[92%] max-w-sm flex items-start gap-2.5 rounded-2xl border border-[#F5B971]/50 bg-[#121318]/95 px-4 py-3 text-left shadow-2xl backdrop-blur-md transition-all tomi-toast-enter"
         >
           <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#F5B971]/15 text-[#F5B971]">
             <Bell className="h-4 w-4" />
@@ -409,13 +419,21 @@ function AppShell() {
       />
 
       {/* Modale sombre custom de confirmation de sortie */}
-      {exitConfirmOpen && (
+      {exitModalAnim.shouldRender && (
         <div
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onClick={() => setExitConfirmOpen(false)}
+          className={`fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 ${backdropMotionClass(
+            exitModalAnim.isVisible
+          )}`}
         >
-          <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl ${dialogMotionClass(
+              exitModalAnim.isVisible
+            )}`}
+          >
             <h2 className="text-base font-semibold text-white">
               Quitter TOMI by BlackSheep ?
             </h2>
@@ -448,12 +466,16 @@ function AppShell() {
       {/* Modals */}
       <QuickEntryModal
         isOpen={quickOpen}
-        onClose={() => setQuickOpen(false)}
+        onClose={() => {
+          setQuickOpen(false);
+          setQuickDefaults({});
+        }}
         defaultPocket={quickDefaults.pocket}
         defaultProjectId={quickDefaults.projectId}
         defaultType={quickDefaults.type}
         defaultOutflowNature={quickDefaults.outflowNature}
         defaultStockItemId={quickDefaults.stockItemId}
+        editingTransaction={quickDefaults.editingTransaction ?? null}
       />
 
       <ProjectFormModal

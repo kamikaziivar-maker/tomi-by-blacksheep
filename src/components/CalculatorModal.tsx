@@ -1,5 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Calculator, Check, Copy, Delete, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { haptics } from '../utils/haptics';
 
 interface CalculatorModalProps {
@@ -33,8 +38,21 @@ export const CalculatorModal: React.FC<CalculatorModalProps> = ({
 }) => {
   const [expr, setExpr] = useState('');
   const [copied, setCopied] = useState(false);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  if (!shouldRender) return null;
 
   const liveResult = evaluateSafeExpression(expr);
 
@@ -108,9 +126,17 @@ export const CalculatorModal: React.FC<CalculatorModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Calculatrice rapide"
-      className="fixed inset-0 z-[60] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
+      onClick={onClose}
+      className={`fixed inset-0 z-[60] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
     >
-      <div className="w-full max-w-sm rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-4 text-zinc-100 shadow-2xl space-y-3">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`w-full max-w-sm rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-4 text-zinc-100 shadow-2xl space-y-3 ${sheetMotionClass(
+          isVisible
+        )}`}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Calculator className="h-4 w-4 text-[#F5B971]" />

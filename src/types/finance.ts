@@ -193,6 +193,15 @@ export interface DebtRepayment {
   note?: string;
 }
 
+export interface DebtEntry {
+  id: string;
+  amountFbu: number;
+  currency?: string;
+  date: string;
+  supportId?: string;
+  note?: string;
+}
+
 export interface DebtItem {
   id: string;
   direction: 'debt' | 'receivable'; // 'debt' = je dois, 'receivable' = on me doit
@@ -203,6 +212,7 @@ export interface DebtItem {
   date: string;
   dueDate?: string;
   note?: string;
+  entries?: DebtEntry[];
   repayments: DebtRepayment[];
 }
 
@@ -228,6 +238,7 @@ export type AccountMode = 'guest' | 'local_profile' | 'cloud_ready';
 
 export interface AccountSecuritySettings {
   mode: AccountMode;
+  remoteUserId?: string;
   displayName: string;
   email?: string;
   avatarDataUrl?: string;

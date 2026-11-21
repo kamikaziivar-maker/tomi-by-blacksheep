@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { HelpCircle, X } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { haptics } from '../utils/haptics';
 
 export type GuideSectionId =
@@ -44,7 +49,7 @@ const SECTION_GUIDES: Record<GuideSectionId, { sectionTitle: string; steps: Guid
       },
       {
         title: '2. Poche & Support exact',
-        body: 'Sélectionnez la poche concernée (Perso, Projet, Épargne ou Dette) puis le support réel débité ou crédité (Cash, Banque, Lumicash, Ecocash...).',
+        body: 'Sélectionnez la poche concernée (Perso, Projet ou Épargne) puis le support réel débité ou crédité (Cash, Banque, Lumicash, Ecocash...).',
       },
     ],
   },
@@ -147,6 +152,7 @@ export const SectionHelper: React.FC<SectionHelperProps> = ({
   const storageKey = `tomi_guide_seen_${section}_v1`;
   const [isOpen, setIsOpen] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
 
   const guide = SECTION_GUIDES[section];
 
@@ -183,6 +189,18 @@ export const SectionHelper: React.FC<SectionHelperProps> = ({
     setIsOpen(false);
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        localStorage.setItem(storageKey, 'true');
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, storageKey]);
+
   const handleNext = async () => {
     await haptics.tap();
     if (stepIndex < guide.steps.length - 1) {
@@ -215,13 +233,21 @@ export const SectionHelper: React.FC<SectionHelperProps> = ({
         </button>
       )}
 
-      {isOpen && (
+      {shouldRender && (
         <div
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onClick={() => void handleClose()}
+          className={`fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm p-4 ${backdropMotionClass(
+            isVisible
+          )}`}
         >
-          <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-md rounded-2xl border border-zinc-800 bg-[#121318] p-5 text-zinc-100 shadow-2xl ${sheetMotionClass(
+              isVisible
+            )}`}
+          >
             <div className="flex items-center justify-between gap-2 mb-2">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#F5B971]">
                 {guide.sectionTitle}

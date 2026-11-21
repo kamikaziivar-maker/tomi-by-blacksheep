@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   Calculator,
@@ -9,6 +9,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { useFinance } from '../store/FinanceContext';
 import {
   PaymentMethod,
@@ -17,6 +22,7 @@ import {
   StockPurchaseLine,
   StockSaleLine,
   SupportType,
+  Transaction,
   TransactionType,
 } from '../types/finance';
 import {
@@ -39,6 +45,7 @@ interface QuickEntryModalProps {
   defaultType?: TransactionType;
   defaultOutflowNature?: ProjectOutflowNature;
   defaultStockItemId?: string;
+  editingTransaction?: Transaction | null;
 }
 
 interface PurchaseDraftRow {
@@ -78,11 +85,20 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   defaultType = TransactionType.INFLOW,
   defaultOutflowNature = 'operating_expense',
   defaultStockItemId,
+  editingTransaction = null,
 }) => {
-  const { state, addQuickTransaction, addProjectTag } = useFinance();
+  const { state, addQuickTransaction, updateQuickTransaction, addProjectTag } =
+    useFinance();
+  const isEditing = Boolean(editingTransaction);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
+  const prevSessionKeyRef = useRef<string | null>(null);
+  const pendingTagRef = useRef<string | null>(null);
+
+  const safeInitialPocket: PocketTarget =
+    defaultPocket === 'debt' ? 'personal' : defaultPocket;
 
   const [txType, setTxType] = useState<TransactionType>(defaultType);
-  const [pocket, setPocket] = useState<PocketTarget>(defaultPocket);
+  const [pocket, setPocket] = useState<PocketTarget>(safeInitialPocket);
   const [projectId, setProjectId] = useState<string>(
     defaultProjectId || state.projects[0]?.id || ''
   );
@@ -137,10 +153,14 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     [state.inventoryItems, projectId]
   );
 
-  const availableProjectStock = useMemo(
-    () => projectInventory.filter((i) => i.quantity > 0),
-    [projectInventory]
-  );
+  const availableProjectStock = useMemo(() => {
+    const editedSaleIds = new Set(
+      (editingTransaction?.stockSaleLines ?? []).map((l) => l.itemId)
+    );
+    return projectInventory.filter(
+      (i) => i.quantity > 0 || editedSaleIds.has(i.id)
+    );
+  }, [projectInventory, editingTransaction]);
 
   const availableSupports = useMemo(() => {
     if (txType === TransactionType.INTERNAL_LOAN) {
@@ -168,15 +188,101 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   }, [txType, projectId, state.supports, supportId]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      prevSessionKeyRef.current = null;
+      pendingTagRef.current = null;
+      return;
+    }
+
+    const sessionKey = editingTransaction
+      ? `edit:${editingTransaction.id}`
+      : `new:${defaultPocket}:${defaultProjectId || ''}:${defaultType}:${defaultOutflowNature}:${defaultStockItemId || ''}`;
+    if (prevSessionKeyRef.current === sessionKey) {
+      return;
+    }
+    prevSessionKeyRef.current = sessionKey;
+    pendingTagRef.current = null;
+
+    if (editingTransaction) {
+      setTxType(editingTransaction.type);
+      setPocket(editingTransaction.pocket);
+      setProjectId(
+        editingTransaction.projectId ||
+          defaultProjectId ||
+          state.projects[0]?.id ||
+          ''
+      );
+      setSavingsGoalId(
+        editingTransaction.savingsGoalId || state.savingsGoals[0]?.id || ''
+      );
+      setDebtId(
+        editingTransaction.debtId ||
+          state.debts.find((d) => d.remainingAmountFbu > 0)?.id ||
+          state.debts[0]?.id ||
+          ''
+      );
+      setSupportId(editingTransaction.supportId);
+      setTargetSupportId(editingTransaction.targetSupportId || '');
+      setAmount(String(editingTransaction.amount));
+      setCurrency(editingTransaction.currency || state.settings.displayCurrency || 'FBU');
+      setPaymentMethod(editingTransaction.paymentMethod);
+      setDate(editingTransaction.date);
+      setLabel(editingTransaction.label);
+      setCategoryOrSource(editingTransaction.categoryOrSource || '');
+      setNewTagInput('');
+      setShowNewTag(false);
+      setOutflowNature(editingTransaction.outflowNature || 'operating_expense');
+
+      if (
+        editingTransaction.stockPurchaseLines &&
+        editingTransaction.stockPurchaseLines.length > 0
+      ) {
+        setPurchaseRows(
+          editingTransaction.stockPurchaseLines.map((line, idx) => ({
+            key: `pr_edit_${idx}_${Date.now()}`,
+            itemId: line.itemId,
+            itemName: line.itemName,
+            quantity: String(line.quantity),
+            unit: line.unit || 'pièce',
+            unitCostFbu: String(line.unitCostFbu),
+            minStockThreshold: String(line.minStockThreshold ?? 5),
+          }))
+        );
+      } else {
+        setPurchaseRows([makeEmptyPurchaseRow()]);
+      }
+
+      if (
+        editingTransaction.stockSaleLines &&
+        editingTransaction.stockSaleLines.length > 0
+      ) {
+        setLinkStockOnSale(true);
+        setSaleRows(
+          editingTransaction.stockSaleLines.map((line, idx) => ({
+            key: `sr_edit_${idx}_${Date.now()}`,
+            itemId: line.itemId,
+            quantity: String(line.quantity),
+          }))
+        );
+      } else {
+        setLinkStockOnSale(false);
+        setSaleRows([]);
+      }
+      return;
+    }
+
     const nextProjId = defaultProjectId || state.projects[0]?.id || '';
+    const nextPocket: PocketTarget =
+      defaultPocket === 'debt' ? 'personal' : defaultPocket;
     setTxType(defaultType);
-    setPocket(defaultPocket);
+    setPocket(nextPocket);
     setProjectId(nextProjId);
+    setSavingsGoalId(state.savingsGoals[0]?.id || '');
     setCurrency(state.settings.displayCurrency || 'FBU');
     setDate(getTodayISO());
     setAmount('');
     setLabel('');
+    setCategoryOrSource('');
     setNewTagInput('');
     setShowNewTag(false);
     setOutflowNature(defaultOutflowNature || 'operating_expense');
@@ -207,6 +313,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     setPurchaseRows([makeEmptyPurchaseRow()]);
   }, [
     isOpen,
+    editingTransaction,
     defaultType,
     defaultPocket,
     defaultProjectId,
@@ -214,8 +321,27 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     defaultStockItemId,
     state.projects,
     state.inventoryItems,
+    state.savingsGoals,
+    state.debts,
     state.settings.displayCurrency,
   ]);
+
+  useEffect(() => {
+    if (!isEditing && pocket === 'debt') {
+      setPocket('personal');
+    }
+  }, [isEditing, pocket]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented && !calcOpen) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, calcOpen, onClose]);
 
   useEffect(() => {
     if (
@@ -236,6 +362,9 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
   }, [targetSupports, targetSupportId]);
 
   useEffect(() => {
+    if (editingTransaction && supportId === editingTransaction.supportId) {
+      return;
+    }
     const selectedSup = state.supports.find((s) => s.id === supportId);
     if (selectedSup) {
       if (selectedSup.type === SupportType.CASH) setPaymentMethod(PaymentMethod.CASH);
@@ -245,7 +374,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         setPaymentMethod(PaymentMethod.ECOCASH);
       else setPaymentMethod(PaymentMethod.LUMICASH);
     }
-  }, [supportId, state.supports]);
+  }, [supportId, state.supports, editingTransaction]);
 
   useEffect(() => {
     if (pocket === 'project' && activeProject) {
@@ -253,11 +382,28 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         txType === TransactionType.INFLOW
           ? activeProject.revenueSources
           : activeProject.expenseCategories;
-      setCategoryOrSource(list[0] || '');
+      setCategoryOrSource((prev) => {
+        if (pendingTagRef.current) {
+          const pending = pendingTagRef.current;
+          if (list.includes(pending)) {
+            pendingTagRef.current = null;
+          }
+          return pending;
+        }
+        if (
+          editingTransaction &&
+          prev &&
+          prev === editingTransaction.categoryOrSource
+        ) {
+          return prev;
+        }
+        if (prev && (list.includes(prev) || prev === 'Autre')) return prev;
+        return list[0] || '';
+      });
     } else {
       setCategoryOrSource('');
     }
-  }, [pocket, activeProject, txType]);
+  }, [pocket, activeProject, txType, editingTransaction]);
 
   // Synchronise le montant total lorsque des lignes d'approvisionnement sont saisies
   const purchaseLinesComputed: StockPurchaseLine[] = useMemo(() => {
@@ -334,7 +480,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     [saleLinesComputed]
   );
 
-  if (!isOpen) return null;
+  if (!shouldRender) return null;
 
   const numericAmount =
     parseFloat(amount.replace(/\s+/g, '').replace(',', '.')) || 0;
@@ -353,14 +499,16 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
       : [];
 
   const handleAddInlineTag = async () => {
-    if (!projectId || !newTagInput.trim()) return;
+    const clean = newTagInput.trim();
+    if (!projectId || !clean) return;
     await haptics.tap();
+    pendingTagRef.current = clean;
     addProjectTag(
       projectId,
       txType === TransactionType.INFLOW ? 'revenue' : 'expense',
-      newTagInput.trim()
+      clean
     );
-    setCategoryOrSource(newTagInput.trim());
+    setCategoryOrSource(clean);
     setNewTagInput('');
     setShowNewTag(false);
   };
@@ -445,7 +593,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
         ? `Vente : ${validSaleLines.map((l) => `${l.quantity} ${l.unit} ${l.itemName}`).slice(0, 2).join(', ')}`
         : 'Opération';
 
-    addQuickTransaction({
+    const payload = {
       type: txType,
       pocket: txType === TransactionType.INTERNAL_LOAN ? 'project' : pocket,
       projectId:
@@ -477,26 +625,48 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
           : undefined,
       stockPurchaseLines: validPurchaseLines,
       stockSaleLines: validSaleLines,
-    });
+    };
+
+    if (editingTransaction) {
+      updateQuickTransaction(editingTransaction.id, payload);
+    } else {
+      addQuickTransaction(payload);
+    }
 
     await haptics.success();
     onClose();
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Saisie rapide"
-    >
-      <div className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl">
-        <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
+    <>
+      <div
+        className={`fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+          isVisible
+        )}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={isEditing ? 'Corriger l’opération' : 'Saisie rapide'}
+        onClick={onClose}
+      >
+        <div
+          className={`w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl ${sheetMotionClass(
+            isVisible
+          )}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
 
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-display text-lg font-bold text-zinc-100">
-            Saisie rapide
-          </h2>
+          <div>
+            <h2 className="font-display text-lg font-bold text-zinc-100">
+              {isEditing ? 'Corriger l’opération' : 'Saisie rapide'}
+            </h2>
+            {isEditing && (
+              <p className="text-[11px] text-zinc-400">
+                Les soldes et stocks associés seront ajustés automatiquement.
+              </p>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => {
@@ -611,12 +781,11 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">
                 Poche concernée
               </label>
-              <div className="grid grid-cols-4 gap-1.5 rounded-xl bg-[#08090C] p-1 border border-zinc-800/80">
+              <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-[#08090C] p-1 border border-zinc-800/80">
                 {[
                   { id: 'personal' as PocketTarget, label: 'Perso' },
                   { id: 'project' as PocketTarget, label: 'Projet' },
                   { id: 'savings' as PocketTarget, label: 'Épargne' },
-                  { id: 'debt' as PocketTarget, label: 'Dette' },
                 ].map((p) => (
                   <button
                     key={p.id}
@@ -959,8 +1128,15 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                       );
                       const qty =
                         parseFloat(row.quantity.replace(',', '.')) || 0;
+                      const priorEditedQty =
+                        editingTransaction?.stockSaleLines?.find(
+                          (l) => l.itemId === row.itemId
+                        )?.quantity || 0;
+                      const effectiveStock = selectedItem
+                        ? selectedItem.quantity + priorEditedQty
+                        : 0;
                       const exceeds =
-                        selectedItem && qty > selectedItem.quantity;
+                        selectedItem && qty > effectiveStock;
                       return (
                         <div key={row.key} className="space-y-1">
                           <div className="flex items-center gap-2">
@@ -1018,7 +1194,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                           </div>
                           {exceeds && (
                             <p className="text-[11px] text-[#F5B971]">
-                              Attention : quantité vendue supérieure au stock disponible ({selectedItem.quantity} {selectedItem.unit}).
+                              Attention : quantité vendue supérieure au stock disponible ({effectiveStock} {selectedItem.unit}).
                             </p>
                           )}
                         </div>
@@ -1108,7 +1284,8 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
               </div>
             )}
 
-          {pocket === 'debt' &&
+          {isEditing &&
+            pocket === 'debt' &&
             (txType === TransactionType.INFLOW ||
               txType === TransactionType.OUTFLOW) && (
               <div>
@@ -1213,7 +1390,7 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                     className="inline-flex items-center gap-1 text-xs font-medium text-[#F5B971] hover:underline"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    <span>Ajouter à la volée</span>
+                    <span>{showNewTag ? 'Annuler' : 'Ajouter à la volée'}</span>
                   </button>
                 </div>
 
@@ -1221,10 +1398,17 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                   <div className="flex gap-2">
                     <input
                       type="text"
+                      autoFocus
                       placeholder="Ex: Commande événement..."
                       value={newTagInput}
                       onChange={(e) => setNewTagInput(e.target.value)}
-                      className="h-11 flex-1 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-sm text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleAddInlineTag();
+                        }
+                      }}
+                      className="h-11 flex-1 rounded-xl border border-[#F5B971]/60 bg-[#08090C] px-3 text-sm text-zinc-100 focus:border-[#F5B971] focus:outline-none"
                     />
                     <button
                       type="button"
@@ -1232,6 +1416,18 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
                       className="h-11 rounded-xl bg-[#F5B971] px-4 text-xs font-semibold text-[#08090C]"
                     >
                       OK
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void haptics.tap();
+                        setNewTagInput('');
+                        setShowNewTag(false);
+                      }}
+                      aria-label="Fermer l’ajout rapide"
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-800 bg-[#08090C] text-zinc-400 hover:text-zinc-100"
+                    >
+                      <X className="h-4 w-4" />
                     </button>
                   </div>
                 ) : (
@@ -1303,9 +1499,10 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
             disabled={numericAmount <= 0 || isViewerOnProject}
             className="mt-2 flex h-12 w-full items-center justify-center rounded-xl bg-[#F5B971] text-sm font-bold text-[#08090C] transition-transform active:scale-[0.98] disabled:opacity-40"
           >
-            Enregistrer l’opération
+            {isEditing ? 'Enregistrer la correction' : 'Enregistrer l’opération'}
           </button>
-        </form>
+          </form>
+        </div>
       </div>
 
       <CalculatorModal
@@ -1315,6 +1512,6 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
           setAmount(String(val));
         }}
       />
-    </div>
+    </>
   );
 };

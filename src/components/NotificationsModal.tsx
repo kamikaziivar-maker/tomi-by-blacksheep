@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -8,6 +8,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { useFinance } from '../store/FinanceContext';
 import { NavTab, NotificationCategory, NotificationItem } from '../types/finance';
 
@@ -45,8 +50,20 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   } = useFinance();
 
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  if (!shouldRender) return null;
 
   const visibleItems =
     filter === 'unread' ? notifications.filter((n) => !n.read) : notifications;
@@ -69,12 +86,20 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4"
+      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
       role="dialog"
       aria-modal="true"
       aria-label="Centre de notifications"
+      onClick={onClose}
     >
-      <div className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#141417] p-5 pb-6 shadow-2xl">
+      <div
+        className={`w-full max-w-lg max-h-[90vh] flex flex-col rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#141417] p-5 pb-6 shadow-2xl ${sheetMotionClass(
+          isVisible
+        )}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
 
         {/* Header */}

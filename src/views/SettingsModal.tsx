@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Bell,
   Camera,
   CheckCircle2,
   Cloud,
   Download,
+  Eye,
   EyeOff,
   Lock,
   LogOut,
+  MailCheck,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -16,6 +19,7 @@ import {
   Trash2,
   Upload,
   UserCheck,
+  UserPlus,
   Wallet,
   Waves,
   Wifi,
@@ -23,6 +27,11 @@ import {
 } from 'lucide-react';
 import { CustomTimePicker } from '../components/CustomTimePicker';
 import { UserAvatar } from '../components/UserAvatar';
+import {
+  backdropMotionClass,
+  sheetMotionClass,
+  useAnimatedVisibility,
+} from '../hooks/useAnimatedVisibility';
 import { DEFAULT_ACCOUNT_SECURITY } from '../data/initialData';
 import { requestMotionPermissionIfNeeded } from '../hooks/useShakeDetector';
 import { useFinance } from '../store/FinanceContext';
@@ -58,11 +67,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     importJson,
     resetToStarter,
     resetToEmpty,
+    activeNamespace,
     enablePinLock,
     disablePinLock,
     lockApp,
     updateAccountProfile,
     loginRemoteAccount,
+    registerRemoteAccount,
+    resendRemoteConfirmation,
     logoutRemoteAccount,
     privacyMode,
     shakeEnabled,
@@ -91,29 +103,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [newRate, setNewRate] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  // Mon Profil & Sécurité (uniquement Profil Local ou Compte Connecté)
+  // Mon Profil & Sécurité (Profil Local isolé vs Compte Connecté)
   const account = state.settings.account ?? DEFAULT_ACCOUNT_SECURITY;
-  const normalizedMode: AccountMode =
-    account.mode === 'cloud_ready' ? 'cloud_ready' : 'local_profile';
+  const isRemoteSessionActive =
+    account.mode === 'cloud_ready' &&
+    (Boolean(account.remoteUserId) || activeNamespace.startsWith('user:'));
+  const normalizedMode: AccountMode = isRemoteSessionActive
+    ? 'cloud_ready'
+    : 'local_profile';
 
+  const [activeProfileTab, setActiveProfileTab] = useState<'local_profile' | 'cloud_ready'>(
+    isRemoteSessionActive ? 'cloud_ready' : 'local_profile'
+  );
   const [profileName, setProfileName] = useState(
     account.displayName === 'Mode Invité (Local)' ? '' : account.displayName
   );
   const [profileEmail, setProfileEmail] = useState(account.email || '');
+
+  // Champs dédiés à l'authentification Cloud (séparés du Profil Local pour éviter tout mélange)
+  const [remoteAuthAction, setRemoteAuthAction] = useState<'signin' | 'signup'>('signin');
+  const [remoteDisplayName, setRemoteDisplayName] = useState('');
+  const [remoteEmail, setRemoteEmail] = useState(
+    isRemoteSessionActive ? account.email || '' : ''
+  );
   const [remotePassword, setRemotePassword] = useState('');
+  const [showRemotePassword, setShowRemotePassword] = useState(false);
   const [isConnectingRemote, setIsConnectingRemote] = useState(false);
+  const [remoteAuthError, setRemoteAuthError] = useState<string | null>(null);
+  const [needsConfirmationEmail, setNeedsConfirmationEmail] = useState<string | null>(null);
+  const [isResendingConfirmation, setIsResendingConfirmation] = useState(false);
+
   const [avatarDataUrl, setAvatarDataUrl] = useState<string | undefined>(
     account.avatarDataUrl
   );
-  const [cloudLabel, setCloudLabel] = useState(
-    account.cloudProviderLabel || 'Supabase'
-  );
-  const [cloudUrl, setCloudUrl] = useState(account.cloudSyncUrl || '');
   const [showPinSetup, setShowPinSetup] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinConfirm, setPinConfirm] = useState('');
   const [localProfileJustSaved, setLocalProfileJustSaved] = useState(false);
   const wasOpenRef = useRef(false);
+  const { shouldRender, isVisible } = useAnimatedVisibility(isOpen);
 
   useEffect(() => {
     if (!isOpen) {
@@ -123,29 +151,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (!wasOpenRef.current) {
       wasOpenRef.current = true;
       const acc = state.settings.account ?? DEFAULT_ACCOUNT_SECURITY;
+      const remoteActive =
+        acc.mode === 'cloud_ready' &&
+        (Boolean(acc.remoteUserId) || activeNamespace.startsWith('user:'));
+      setActiveProfileTab(remoteActive ? 'cloud_ready' : 'local_profile');
       setProfileName(
         acc.displayName === 'Mode Invité (Local)' ? '' : acc.displayName
       );
       setProfileEmail(acc.email || '');
+      if (remoteActive) {
+        setRemoteEmail(acc.email || '');
+      }
       setRemotePassword('');
+      setShowRemotePassword(false);
+      setRemoteAuthError(null);
+      setNeedsConfirmationEmail(null);
       setAvatarDataUrl(acc.avatarDataUrl);
-      setCloudLabel(acc.cloudProviderLabel || 'Supabase');
-      setCloudUrl(acc.cloudSyncUrl || '');
       setFeedback(null);
       setLocalProfileJustSaved(false);
-    }
 
-    if (initialFocusSection === 'profile') {
-      window.setTimeout(() => {
-        profileSectionRef.current?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'start',
-        });
-      }, 60);
+      if (initialFocusSection === 'profile') {
+        window.setTimeout(() => {
+          profileSectionRef.current?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start',
+          });
+        }, 60);
+      }
     }
-  }, [isOpen, initialFocusSection, state.settings.account]);
+  }, [isOpen, initialFocusSection, state.settings.account, activeNamespace]);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  if (!shouldRender) return null;
 
   const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -160,7 +207,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setAvatarDataUrl(compressed);
       updateAccountProfile({ avatarDataUrl: compressed });
       await haptics.success();
-      setFeedback('Photo de profil compressée et enregistrée localement.');
+      setFeedback('Photo de profil compressée et enregistrée.');
     } catch (err) {
       setFeedback(
         err instanceof Error
@@ -172,6 +219,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (activeProfileTab === 'local_profile' && isRemoteSessionActive) {
+      setFeedback(
+        'Déconnectez d’abord le compte Cloud actif pour modifier votre Profil Local.'
+      );
+      return;
+    }
+
     const nextName =
       profileName.trim() ||
       (normalizedMode === 'cloud_ready' ? 'Compte Connecté' : 'Profil Local');
@@ -183,12 +237,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       displayName: nextName,
       email: profileEmail.trim() || undefined,
       avatarDataUrl,
-      cloudProviderLabel:
-        normalizedMode === 'cloud_ready'
-          ? cloudLabel.trim() || 'Supabase'
-          : undefined,
-      cloudSyncUrl:
-        normalizedMode === 'cloud_ready' ? cloudUrl.trim() || undefined : undefined,
+      cloudProviderLabel: normalizedMode === 'cloud_ready' ? 'Supabase' : undefined,
       localProfileConfirmedAt:
         normalizedMode === 'local_profile'
           ? confirmedIso
@@ -200,71 +249,84 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
     setFeedback(
       normalizedMode === 'cloud_ready'
-        ? 'Profil de Compte Connecté enregistré. La synchronisation se fera automatiquement dès qu’un réseau est détecté.'
+        ? 'Profil du Compte Connecté mis à jour et synchronisé dans son espace isolé.'
         : `Profil local « ${nextName} » configuré et enregistré sur cet appareil.`
     );
   };
 
-  const handleRemoteConnect = async () => {
-    const cleanEmail = profileEmail.trim();
-    if (!cleanEmail || remotePassword.length < 6) {
-      setFeedback(
-        'Saisissez votre adresse e-mail et un mot de passe (6 caractères minimum) pour charger votre compte.'
-      );
+  const handleRemoteAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = remoteEmail.trim().toLowerCase();
+    setRemoteAuthError(null);
+    setNeedsConfirmationEmail(null);
+
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setRemoteAuthError('Veuillez saisir une adresse e-mail valide.');
+      return;
+    }
+    if (remotePassword.length < 6) {
+      setRemoteAuthError('Le mot de passe doit contenir au moins 6 caractères.');
       return;
     }
 
     setIsConnectingRemote(true);
     setFeedback(null);
-    const res = await loginRemoteAccount(cleanEmail, remotePassword);
-    setIsConnectingRemote(false);
 
-    if (profileName.trim()) {
-      updateAccountProfile({ displayName: profileName.trim() });
-    }
+    const res =
+      remoteAuthAction === 'signup'
+        ? await registerRemoteAccount(cleanEmail, remotePassword, remoteDisplayName)
+        : await loginRemoteAccount(cleanEmail, remotePassword);
+
+    setIsConnectingRemote(false);
 
     if (res.ok) {
       setRemotePassword('');
+      setRemoteDisplayName('');
+      setRemoteAuthError(null);
+      setNeedsConfirmationEmail(null);
+      setProfileEmail(cleanEmail);
       await haptics.success();
+      setFeedback(res.message);
     } else {
       await haptics.warning();
+      setRemoteAuthError(res.message);
+      if (res.needsEmailConfirmation) {
+        setNeedsConfirmationEmail(cleanEmail);
+      }
     }
-    setFeedback(res.message);
   };
 
-  const handleModeChange = async (mode: 'local_profile' | 'cloud_ready') => {
-    await haptics.tap();
-    const fallbackName =
-      profileName.trim() ||
-      (mode === 'cloud_ready' ? 'Compte Connecté' : 'Profil Local');
+  const handleResendConfirmation = async () => {
+    const targetEmail = (needsConfirmationEmail || remoteEmail).trim().toLowerCase();
+    if (!targetEmail) return;
+    setIsResendingConfirmation(true);
+    const res = await resendRemoteConfirmation(targetEmail);
+    setIsResendingConfirmation(false);
+    if (res.ok) {
+      await haptics.success();
+      setRemoteAuthError(null);
+      setFeedback(res.message);
+    } else {
+      await haptics.warning();
+      setRemoteAuthError(res.message);
+    }
+  };
 
-    setProfileName(fallbackName);
-    updateAccountProfile({
-      mode,
-      displayName: fallbackName,
-      email: profileEmail.trim() || undefined,
-      avatarDataUrl,
-      cloudProviderLabel:
-        mode === 'cloud_ready' ? cloudLabel.trim() || 'Supabase' : undefined,
-      cloudSyncUrl:
-        mode === 'cloud_ready' ? cloudUrl.trim() || undefined : undefined,
-    });
-    setFeedback(
-      mode === 'cloud_ready'
-        ? 'Mode Compte Connecté sélectionné : saisissez votre e-mail et mot de passe pour charger vos données sur cet appareil.'
-        : 'Mode Profil Local sélectionné : 100 % stocké sur ce téléphone et opérationnel hors ligne.'
-    );
+  const handleProfileTabSelect = async (tab: 'local_profile' | 'cloud_ready') => {
+    await haptics.tap();
+    setActiveProfileTab(tab);
+    setRemoteAuthError(null);
   };
 
   const handleDisconnectRemoteSession = async () => {
     await haptics.warning();
     await logoutRemoteAccount();
-    setProfileName('');
-    setProfileEmail('');
+    setActiveProfileTab('local_profile');
     setRemotePassword('');
-    setAvatarDataUrl(undefined);
+    setRemoteAuthError(null);
+    setNeedsConfirmationEmail(null);
     setFeedback(
-      'Session distante déconnectée et données effacées de cet appareil.'
+      'Compte Cloud déconnecté et son cache local purgé. Votre Profil Local de l’appareil a été restauré intact.'
     );
   };
 
@@ -346,12 +408,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
+      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4 ${backdropMotionClass(
+        isVisible
+      )}`}
       role="dialog"
       aria-modal="true"
       aria-label="Paramètres et données"
+      onClick={onClose}
     >
-      <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl space-y-6">
+      <div
+        className={`w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-5 pb-7 shadow-2xl space-y-6 ${sheetMotionClass(
+          isVisible
+        )}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="mx-auto -mt-1 h-1 w-10 rounded-full bg-zinc-700 sm:hidden" />
 
         <div className="flex items-center justify-between">
@@ -405,72 +475,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </span>
           </div>
 
-          {/* Suggestion claire de configuration au démarrage */}
+          {/* Explication du cloisonnement strict */}
           <div className="rounded-xl border border-zinc-800/90 bg-[#121318] p-3 text-[11px] leading-relaxed text-zinc-400">
-            Configurez d’abord votre <strong className="text-zinc-200">Profil Local</strong>{' '}
-            pour vos opérations quotidiennes sur ce téléphone : les données déjà
-            présentes peuvent être modifiées ou remplacées librement. Utilisez le{' '}
-            <strong className="text-zinc-200">Compte Connecté</strong> si vous
-            souhaitez charger vos données sur un autre téléphone et les
-            synchroniser automatiquement dès qu’un réseau est détecté.
+            Votre <strong className="text-zinc-200">Profil Local</strong> reste
+            strictement isolé et conservé sur cet appareil. Lorsque vous connectez un{' '}
+            <strong className="text-zinc-200">Compte Connecté</strong> (même sur le
+            téléphone d’un ami), ses données s’ouvrent dans un espace séparé sans jamais
+            écraser ni mélanger le Profil Local.
           </div>
 
-          {/* Photo de profil + Nom */}
-          <div className="flex flex-wrap items-center gap-3.5 rounded-xl border border-zinc-800/80 bg-[#121318] p-3">
-            <UserAvatar
-              name={profileName || 'Profil Local'}
-              avatarDataUrl={avatarDataUrl}
-              size="lg"
-            />
-            <div className="flex-1 min-w-[180px] space-y-1.5">
-              <div className="text-xs font-semibold text-zinc-100">
-                Photo de profil
-              </div>
-              <p className="text-[11px] text-zinc-500">
-                Compressée automatiquement en miniature légère stockée localement.
-              </p>
-              <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => avatarInputRef.current?.click()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-700 bg-[#08090C] px-2.5 text-xs font-medium text-[#F5B971] hover:border-[#F5B971]"
-                >
-                  <Camera className="h-3.5 w-3.5" />
-                  <span>
-                    {avatarDataUrl ? 'Changer la photo' : 'Importer une photo'}
-                  </span>
-                </button>
-                {avatarDataUrl && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAvatarDataUrl(undefined);
-                      updateAccountProfile({ avatarDataUrl: undefined });
-                      setFeedback('Photo de profil retirée.');
-                    }}
-                    className="h-8 rounded-lg px-2 text-xs text-zinc-400 hover:text-[#EF4444]"
-                  >
-                    Retirer
-                  </button>
-                )}
-              </div>
-              <input
-                ref={avatarInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleAvatarUpload}
-                className="hidden"
-              />
-            </div>
-          </div>
-
-          {/* 2 modes uniquement : Profil Local vs Compte Connecté */}
+          {/* Sélecteur 2 espaces : Profil Local vs Compte Connecté */}
           <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-zinc-800/80 bg-[#121318] p-1">
             <button
               type="button"
-              onClick={() => void handleModeChange('local_profile')}
+              onClick={() => void handleProfileTabSelect('local_profile')}
               className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                normalizedMode === 'local_profile'
+                activeProfileTab === 'local_profile'
                   ? 'bg-[#18181B] text-[#F5B971] border border-zinc-700 font-semibold'
                   : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
               }`}
@@ -481,148 +501,367 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             <button
               type="button"
-              onClick={() => void handleModeChange('cloud_ready')}
+              onClick={() => void handleProfileTabSelect('cloud_ready')}
               className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                normalizedMode === 'cloud_ready'
+                activeProfileTab === 'cloud_ready'
                   ? 'bg-[#18181B] text-[#F5B971] border border-zinc-700 font-semibold'
                   : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
               }`}
             >
               <Cloud className="h-3.5 w-3.5" />
               <span>Compte Connecté</span>
+              {isRemoteSessionActive && (
+                <span className="h-2 w-2 rounded-full bg-[#10B981]" aria-hidden="true" />
+              )}
             </button>
           </div>
 
-          <form onSubmit={handleSaveProfile} className="space-y-2.5">
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <input
-                type="text"
-                placeholder="Votre nom (ex: Guy Bertrand)"
-                value={profileName}
-                onChange={(e) => setProfileName(e.target.value)}
-                className="h-10 rounded-xl border border-zinc-800 bg-[#121318] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-              />
-              <input
-                type="email"
-                placeholder={
-                  normalizedMode === 'cloud_ready'
-                    ? 'Email du compte (requis pour sync)'
-                    : 'Email (optionnel)'
-                }
-                value={profileEmail}
-                onChange={(e) => setProfileEmail(e.target.value)}
-                className="h-10 rounded-xl border border-zinc-800 bg-[#121318] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-              />
-            </div>
-
-            {normalizedMode === 'cloud_ready' && (
-              <div className="space-y-2 rounded-xl border border-zinc-800/80 bg-[#121318] p-3">
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <input
-                    type="password"
-                    placeholder="Mot de passe du compte (6+ car.)"
-                    value={remotePassword}
-                    onChange={(e) => setRemotePassword(e.target.value)}
-                    className="h-10 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+          {activeProfileTab === 'local_profile' ? (
+            isRemoteSessionActive ? (
+              <div className="space-y-3 rounded-xl border border-zinc-800 bg-[#121318] p-4">
+                <div className="flex items-start gap-2.5">
+                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#10B981]" />
+                  <div className="space-y-1 text-xs">
+                    <div className="font-semibold text-zinc-100">
+                      Profil Local protégé en arrière-plan
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-zinc-400">
+                      Le compte Cloud{' '}
+                      <strong className="text-zinc-200">{account.email}</strong> est
+                      actuellement ouvert sur cet appareil. Le Profil Local de ce
+                      téléphone est conservé intact dans son espace séparé.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDisconnectRemoteSession()}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-[#EF4444]/35 bg-[#EF4444]/10 px-3 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/20"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Se déconnecter du Cloud &amp; revenir au Profil Local</span>
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Photo de profil + Nom */}
+                <div className="flex flex-wrap items-center gap-3.5 rounded-xl border border-zinc-800/80 bg-[#121318] p-3">
+                  <UserAvatar
+                    name={profileName || 'Profil Local'}
+                    avatarDataUrl={avatarDataUrl}
+                    size="lg"
                   />
-                  <button
-                    type="button"
-                    disabled={isConnectingRemote}
-                    onClick={() => void handleRemoteConnect()}
-                    className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-[#F5B971] px-3 text-xs font-bold text-[#08090C] disabled:opacity-60"
-                  >
-                    <Cloud className="h-3.5 w-3.5" />
-                    <span>
-                      {isConnectingRemote
-                        ? 'Connexion...'
-                        : 'Se connecter & charger'}
-                    </span>
-                  </button>
+                  <div className="flex-1 min-w-[180px] space-y-1.5">
+                    <div className="text-xs font-semibold text-zinc-100">
+                      Photo de profil
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      Compressée automatiquement en miniature légère stockée localement.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => avatarInputRef.current?.click()}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-700 bg-[#08090C] px-2.5 text-xs font-medium text-[#F5B971] hover:border-[#F5B971]"
+                      >
+                        <Camera className="h-3.5 w-3.5" />
+                        <span>
+                          {avatarDataUrl ? 'Changer la photo' : 'Importer une photo'}
+                        </span>
+                      </button>
+                      {avatarDataUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAvatarDataUrl(undefined);
+                            updateAccountProfile({ avatarDataUrl: undefined });
+                            setFeedback('Photo de profil retirée.');
+                          }}
+                          className="h-8 rounded-lg px-2 text-xs text-zinc-400 hover:text-[#EF4444]"
+                        >
+                          Retirer
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      ref={avatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleAvatarUpload}
+                      className="hidden"
+                    />
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <form onSubmit={handleSaveProfile} className="space-y-2.5">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <input
+                      type="text"
+                      placeholder="Votre nom (ex: Guy Bertrand)"
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      className="h-10 rounded-xl border border-zinc-800 bg-[#121318] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                    />
+                    <input
+                      type="email"
+                      placeholder="Email de contact (optionnel)"
+                      value={profileEmail}
+                      onChange={(e) => setProfileEmail(e.target.value)}
+                      className="h-10 rounded-xl border border-zinc-800 bg-[#121318] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] text-zinc-500">
+                      100 % stocké sur ce téléphone, utilisable hors ligne.
+                    </span>
+                    <button
+                      type="submit"
+                      className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#F5B971] px-3.5 text-xs font-bold text-[#08090C] shrink-0 hover:bg-[#f7c587]"
+                    >
+                      <UserCheck className="h-3.5 w-3.5" />
+                      <span>Enregistrer &amp; confirmer le profil local</span>
+                    </button>
+                  </div>
+                </form>
+
+                {(localProfileJustSaved || Boolean(account.localProfileConfirmedAt)) && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-start gap-2.5 rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs"
+                  >
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#10B981]" />
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="font-semibold text-[#10B981]">
+                        Profil local configuré et enregistré sur cet appareil
+                      </div>
+                      <div className="text-[11px] text-zinc-300">
+                        Profil :{' '}
+                        <strong className="text-zinc-100">{account.displayName}</strong>
+                        {account.localProfileConfirmedAt && (
+                          <>
+                            {' · '}
+                            Sauvegardé le{' '}
+                            {new Date(account.localProfileConfirmedAt).toLocaleString(
+                              'fr-FR',
+                              {
+                                day: '2-digit',
+                                month: 'short',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              }
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          ) : isRemoteSessionActive ? (
+            /* Session Cloud active et isolée */
+            <div className="space-y-3 rounded-xl border border-[#10B981]/35 bg-[#121318] p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <UserAvatar
+                    name={account.displayName || 'Compte Connecté'}
+                    avatarDataUrl={avatarDataUrl}
+                    size="md"
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-[#10B981]">
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      <span>Session Cloud connectée</span>
+                    </div>
+                    <div className="truncate text-xs font-medium text-zinc-100">
+                      {account.email}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDisconnectRemoteSession()}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#EF4444]/35 bg-[#EF4444]/10 px-3 text-xs font-semibold text-[#EF4444] hover:bg-[#EF4444]/20"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Déconnexion</span>
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveProfile} className="space-y-2 border-t border-zinc-800/80 pt-3">
+                <label className="block text-[11px] font-medium text-zinc-400">
+                  Nom affiché sur ce compte
+                </label>
+                <div className="flex flex-wrap gap-2">
                   <input
                     type="text"
-                    placeholder="Service cloud (ex: Supabase)"
-                    value={cloudLabel}
-                    onChange={(e) => setCloudLabel(e.target.value)}
-                    className="h-10 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                    placeholder="Votre nom"
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                    className="h-10 flex-1 min-w-[160px] rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
                   />
-                  <input
-                    type="url"
-                    placeholder="URL projet Supabase (optionnel)"
-                    value={cloudUrl}
-                    onChange={(e) => setCloudUrl(e.target.value)}
-                    className="h-10 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-                  />
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <span className="text-[11px] text-zinc-400">
-                    Sauvegarde auto dès détection d’un réseau mobile/Wi-Fi.
-                  </span>
                   <button
-                    type="button"
-                    onClick={() => void handleDisconnectRemoteSession()}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#EF4444]/30 bg-[#EF4444]/10 px-2.5 text-[11px] font-medium text-[#EF4444] hover:bg-[#EF4444]/20"
+                    type="submit"
+                    className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#F5B971] px-3.5 text-xs font-bold text-[#08090C] hover:bg-[#f7c587]"
                   >
-                    <LogOut className="h-3.5 w-3.5" />
-                    <span>Déconnexion &amp; vider l’appareil</span>
+                    <UserCheck className="h-3.5 w-3.5" />
+                    <span>Enregistrer le nom</span>
                   </button>
                 </div>
-              </div>
-            )}
+              </form>
 
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[11px] text-zinc-500">
-                {normalizedMode === 'cloud_ready'
-                  ? 'Prêt pour connexion à distance et sync auto sur réseau.'
-                  : 'Stocké localement sur ce téléphone, utilisable hors ligne.'}
-              </span>
-              <button
-                type="submit"
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#F5B971] px-3.5 text-xs font-bold text-[#08090C] shrink-0 hover:bg-[#f7c587]"
-              >
-                <UserCheck className="h-3.5 w-3.5" />
-                <span>
-                  {normalizedMode === 'local_profile'
-                    ? 'Enregistrer & confirmer le profil local'
-                    : 'Enregistrer le profil connecté'}
-                </span>
-              </button>
+              <p className="text-[11px] leading-relaxed text-zinc-400">
+                Synchronisation automatique active dès qu’un réseau est détecté. La
+                déconnexion efface uniquement les caches locaux de ce compte et restaure
+                intact le Profil Local de cet appareil.
+              </p>
             </div>
-          </form>
-
-          {normalizedMode === 'local_profile' &&
-            (localProfileJustSaved || Boolean(account.localProfileConfirmedAt)) && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex items-start gap-2.5 rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs"
-              >
-                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#10B981]" />
-                <div className="min-w-0 space-y-0.5">
-                  <div className="font-semibold text-[#10B981]">
-                    Profil local configuré et enregistré sur cet appareil
-                  </div>
-                  <div className="text-[11px] text-zinc-300">
-                    Profil : <strong className="text-zinc-100">{account.displayName}</strong>
-                    {account.localProfileConfirmedAt && (
-                      <>
-                        {' · '}
-                        Sauvegardé le{' '}
-                        {new Date(account.localProfileConfirmedAt).toLocaleString('fr-FR', {
-                          day: '2-digit',
-                          month: 'short',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </>
-                    )}
-                  </div>
-                </div>
+          ) : (
+            /* Formulaire Connexion / Création de compte Cloud (E-mail + Mot de passe) */
+            <div className="space-y-3 rounded-xl border border-zinc-800/80 bg-[#121318] p-3.5">
+              <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-zinc-800 bg-[#08090C] p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRemoteAuthAction('signin');
+                    setRemoteAuthError(null);
+                  }}
+                  className={`flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium transition-colors ${
+                    remoteAuthAction === 'signin'
+                      ? 'bg-[#1A1C23] text-[#F5B971] border border-zinc-700 font-semibold'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  <Cloud className="h-3.5 w-3.5" />
+                  <span>Se connecter</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRemoteAuthAction('signup');
+                    setRemoteAuthError(null);
+                  }}
+                  className={`flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium transition-colors ${
+                    remoteAuthAction === 'signup'
+                      ? 'bg-[#1A1C23] text-[#F5B971] border border-zinc-700 font-semibold'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  <span>Créer un compte</span>
+                </button>
               </div>
-            )}
+
+              <form onSubmit={handleRemoteAuthSubmit} className="space-y-2.5">
+                {remoteAuthAction === 'signup' && (
+                  <input
+                    type="text"
+                    placeholder="Votre nom / pseudo (ex: Guy Bertrand)"
+                    value={remoteDisplayName}
+                    onChange={(e) => setRemoteDisplayName(e.target.value)}
+                    autoComplete="name"
+                    className="h-10 w-full rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                  />
+                )}
+
+                <input
+                  type="email"
+                  placeholder="Adresse e-mail du compte"
+                  value={remoteEmail}
+                  onChange={(e) => setRemoteEmail(e.target.value)}
+                  autoComplete="email"
+                  required
+                  className="h-10 w-full rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                />
+
+                <div className="relative">
+                  <input
+                    type={showRemotePassword ? 'text' : 'password'}
+                    placeholder="Mot de passe (6 caractères minimum)"
+                    value={remotePassword}
+                    onChange={(e) => setRemotePassword(e.target.value)}
+                    autoComplete={
+                      remoteAuthAction === 'signup' ? 'new-password' : 'current-password'
+                    }
+                    required
+                    className="h-10 w-full rounded-xl border border-zinc-800 bg-[#08090C] pl-3 pr-10 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowRemotePassword((v) => !v)}
+                    aria-label={
+                      showRemotePassword
+                        ? 'Masquer le mot de passe'
+                        : 'Afficher le mot de passe'
+                    }
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  >
+                    {showRemotePassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+
+                {remoteAuthError && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2.5 text-[11px] leading-relaxed text-[#FCA5A5]"
+                  >
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#EF4444]" />
+                    <div className="space-y-2 flex-1">
+                      <div>{remoteAuthError}</div>
+                      {needsConfirmationEmail && (
+                        <button
+                          type="button"
+                          disabled={isResendingConfirmation}
+                          onClick={() => void handleResendConfirmation()}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#F5B971]/40 bg-[#F5B971]/15 px-2.5 text-[11px] font-semibold text-[#F5B971] hover:bg-[#F5B971]/25 disabled:opacity-60"
+                        >
+                          <MailCheck className="h-3.5 w-3.5" />
+                          <span>
+                            {isResendingConfirmation
+                              ? 'Envoi en cours...'
+                              : 'Renvoyer l’e-mail de confirmation'}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isConnectingRemote}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#F5B971] px-4 text-xs font-bold text-[#08090C] hover:bg-[#f7c587] disabled:opacity-60"
+                >
+                  {remoteAuthAction === 'signup' ? (
+                    <UserPlus className="h-4 w-4" />
+                  ) : (
+                    <Cloud className="h-4 w-4" />
+                  )}
+                  <span>
+                    {isConnectingRemote
+                      ? remoteAuthAction === 'signup'
+                        ? 'Création du compte...'
+                        : 'Connexion & chargement...'
+                      : remoteAuthAction === 'signup'
+                      ? 'Créer mon compte & synchroniser'
+                      : 'Se connecter & charger mes données'}
+                  </span>
+                </button>
+              </form>
+
+              <p className="text-[11px] leading-relaxed text-zinc-500">
+                Espace strictement isolé : vos données Cloud s’ouvrent séparément et ne
+                modifient jamais le Profil Local enregistré sur ce téléphone.
+              </p>
+            </div>
+          )}
           {/* Code PIN local optionnel */}
           <div className="border-t border-zinc-800/80 pt-3 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
