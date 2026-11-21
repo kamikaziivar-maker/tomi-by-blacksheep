@@ -1,0 +1,6 @@
+{
+  "name": "TOMI by BlackSheep",
+  "description": "Application mobile-first de gestion financière personnelle et multi-projets, multi-devises (FBU), suivi de trésorerie Cash/Banque/Mobile Money, dettes, épargne et assistant stratégique.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

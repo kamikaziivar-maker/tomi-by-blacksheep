@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@layer base {
+  :root,
+  html,
+  body {
+    color-scheme: dark only;
+    background-color: #0D0D0F;
+    color: #F4F4F5;
+  }
+
+  :root {
+    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html,
+  body {
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+@keyframes ambient-flow-gold {
+  0% {
+    transform: translate3d(-6%, -2%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, 3%, 0) scale(1.03);
+  }
+  100% {
+    transform: translate3d(-6%, -2%, 0) scale(1);
+  }
+}
+
+@keyframes ambient-flow-emerald {
+  0% {
+    transform: translate3d(6%, 3%, 0) scale(1.02);
+  }
+  50% {
+    transform: translate3d(-5%, -3%, 0) scale(0.98);
+  }
+  100% {
+    transform: translate3d(6%, 3%, 0) scale(1.02);
+  }
+}
+
+@keyframes ambient-flow-horizon {
+  0% {
+    transform: translate3d(-4%, 2%, 0);
+  }
+  50% {
+    transform: translate3d(4%, -2%, 0);
+  }
+  100% {
+    transform: translate3d(-4%, 2%, 0);
+  }
+}
+
+.ambient-flow-1 {
+  animation: ambient-flow-gold 24s ease-in-out infinite;
+  will-change: transform;
+}
+
+.ambient-flow-2 {
+  animation: ambient-flow-emerald 30s ease-in-out infinite;
+  will-change: transform;
+}
+
+.ambient-flow-3 {
+  animation: ambient-flow-horizon 36s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Custom sleek dark scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0D0D0F;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272A;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3F3F46;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  
+  .logo-screen-blend {
+  mix-blend-mode: screen;
+}
+
+}
