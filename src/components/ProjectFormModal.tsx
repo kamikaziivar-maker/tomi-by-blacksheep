@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Trash2, X } from 'lucide-react';
+import { Banknote, Landmark, Plus, Smartphone, Trash2, X } from 'lucide-react';
 import { useFinance } from '../store/FinanceContext';
 import { Project, ProjectCategory, SupportType } from '../types/finance';
+import {
+  parseSignedAmount,
+  sanitizeSignedNumberInput,
+  toggleSignedInput,
+} from '../utils/format';
+import { CustomSelect, CustomSelectOption } from './CustomSelect';
 
 interface ProjectFormModalProps {
   isOpen: boolean;
@@ -10,6 +16,24 @@ interface ProjectFormModalProps {
 }
 
 const CATEGORIES = Object.values(ProjectCategory);
+
+const DRAFT_SUPPORT_TYPE_OPTIONS: CustomSelectOption[] = [
+  {
+    value: SupportType.CASH,
+    label: 'Cash',
+    icon: <Banknote className="h-4 w-4 text-zinc-300" />,
+  },
+  {
+    value: SupportType.BANK,
+    label: 'Banque',
+    icon: <Landmark className="h-4 w-4 text-[#F5B971]" />,
+  },
+  {
+    value: SupportType.MOBILE_MONEY,
+    label: 'Mobile Money',
+    icon: <Smartphone className="h-4 w-4 text-[#10B981]" />,
+  },
+];
 
 interface DraftSupport {
   type: SupportType;
@@ -130,7 +154,7 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
             name: s.name.trim(),
             reference: s.reference.trim() || undefined,
             currency: s.currency,
-            balance: parseFloat(s.balance) || 0,
+            balance: parseSignedAmount(s.balance),
           })),
       });
     }
@@ -180,17 +204,17 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">
                 Catégorie
               </label>
-              <select
+              <CustomSelect
                 value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="h-11 w-full rounded-xl border border-zinc-800 bg-[#0D0D0F] px-3 text-sm text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-              >
-                {CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
+                onChange={(val) => setCategory(val)}
+                title="Catégorie du projet"
+                searchable={false}
+                options={CATEGORIES.map((cat) => ({
+                  value: cat,
+                  label: cat,
+                }))}
+                className="h-11 w-full rounded-xl border border-zinc-800 bg-[#0D0D0F] px-3 text-sm text-zinc-100 hover:border-zinc-700"
+              />
             </div>
 
             {category === ProjectCategory.AUTRE && (
@@ -244,19 +268,20 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                     key={idx}
                     className="grid grid-cols-1 gap-2 rounded-xl border border-zinc-800/80 bg-[#0D0D0F] p-3 sm:grid-cols-12"
                   >
-                    <select
-                      value={sup.type}
-                      onChange={(e) => {
-                        const next = [...draftSupports];
-                        next[idx].type = e.target.value as SupportType;
-                        setDraftSupports(next);
-                      }}
-                      className="h-9 rounded-lg border border-zinc-800 bg-[#141417] px-2 text-xs text-zinc-200 sm:col-span-3"
-                    >
-                      <option value={SupportType.CASH}>Cash</option>
-                      <option value={SupportType.BANK}>Banque</option>
-                      <option value={SupportType.MOBILE_MONEY}>Mobile Money</option>
-                    </select>
+                    <div className="sm:col-span-3">
+                      <CustomSelect
+                        value={sup.type}
+                        onChange={(val) => {
+                          const next = [...draftSupports];
+                          next[idx].type = val as SupportType;
+                          setDraftSupports(next);
+                        }}
+                        options={DRAFT_SUPPORT_TYPE_OPTIONS}
+                        title="Type de support"
+                        searchable={false}
+                        className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2 text-xs text-zinc-200 hover:border-zinc-700"
+                      />
+                    </div>
                     <input
                       type="text"
                       placeholder="Nom du compte / caisse"
@@ -268,33 +293,65 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                       }}
                       className="h-9 rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs text-zinc-100 sm:col-span-4"
                     />
-                    <input
-                      type="number"
-                      placeholder="Solde initial"
-                      value={sup.balance}
-                      onChange={(e) => {
-                        const next = [...draftSupports];
-                        next[idx].balance = e.target.value;
-                        setDraftSupports(next);
-                      }}
-                      className="h-9 rounded-lg border border-zinc-800 bg-[#141417] px-2.5 font-mono-num text-xs text-zinc-100 sm:col-span-3"
-                    />
-                    <div className="flex items-center gap-1 sm:col-span-2">
-                      <select
-                        value={sup.currency}
-                        onChange={(e) => {
+                    <div className="flex items-center gap-1 sm:col-span-3">
+                      <button
+                        type="button"
+                        onClick={() => {
                           const next = [...draftSupports];
-                          next[idx].currency = e.target.value;
+                          next[idx].balance = toggleSignedInput(next[idx].balance);
                           setDraftSupports(next);
                         }}
-                        className="h-9 flex-1 rounded-lg border border-zinc-800 bg-[#141417] px-1.5 text-xs text-[#F5B971]"
+                        aria-label="Basculer positif / négatif"
+                        title="Positif / Négatif"
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border font-mono-num text-xs font-bold ${
+                          sup.balance.trim().startsWith('-')
+                            ? 'border-[#EF4444]/60 bg-[#EF4444]/15 text-[#EF4444]'
+                            : 'border-zinc-800 bg-[#141417] text-zinc-300'
+                        }`}
                       >
-                        {state.settings.currencies.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.code}
-                          </option>
-                        ))}
-                      </select>
+                        +/−
+                      </button>
+                      <input
+                        type="text"
+                        inputMode="text"
+                        placeholder="Solde initial"
+                        value={sup.balance}
+                        onChange={(e) => {
+                          const next = [...draftSupports];
+                          next[idx].balance = sanitizeSignedNumberInput(e.target.value);
+                          setDraftSupports(next);
+                        }}
+                        className={`h-9 min-w-0 flex-1 rounded-lg border bg-[#141417] px-2.5 font-mono-num text-xs focus:border-[#F5B971] focus:outline-none ${
+                          sup.balance.trim().startsWith('-')
+                            ? 'border-[#EF4444]/50 text-[#EF4444]'
+                            : 'border-zinc-800 text-zinc-100'
+                        }`}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 sm:col-span-2">
+                      <div className="flex-1 min-w-0">
+                        <CustomSelect
+                          value={sup.currency}
+                          onChange={(val) => {
+                            const next = [...draftSupports];
+                            next[idx].currency = val;
+                            setDraftSupports(next);
+                          }}
+                          title="Devise"
+                          searchable={false}
+                          options={state.settings.currencies.map((c) => ({
+                            value: c.code,
+                            label: `${c.code} — ${c.name}`,
+                            badge: c.symbol,
+                          }))}
+                          renderSelected={(opt) => (
+                            <span className="truncate font-mono-num text-xs font-semibold text-[#F5B971]">
+                              {opt?.value || sup.currency}
+                            </span>
+                          )}
+                          className="h-9 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2 text-xs text-[#F5B971] hover:border-zinc-700"
+                        />
+                      </div>
                       {draftSupports.length > 1 && (
                         <button
                           type="button"

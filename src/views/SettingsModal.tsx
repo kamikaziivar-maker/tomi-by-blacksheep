@@ -2,12 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   Camera,
+  CheckCircle2,
   Cloud,
   Download,
   EyeOff,
   Lock,
   LogOut,
   Plus,
+  RefreshCw,
   RotateCcw,
   ShieldCheck,
   Smartphone,
@@ -19,6 +21,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
+import { CustomTimePicker } from '../components/CustomTimePicker';
 import { UserAvatar } from '../components/UserAvatar';
 import { DEFAULT_ACCOUNT_SECURITY } from '../data/initialData';
 import { requestMotionPermissionIfNeeded } from '../hooks/useShakeDetector';
@@ -37,6 +40,7 @@ interface SettingsModalProps {
     title: string
   ) => void;
   initialFocusSection?: 'profile' | 'general';
+  onReplaySplash?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -69,9 +73,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     ambientFlowsEnabled,
     setAmbientFlowsEnabled,
     notificationSettings,
+    pushStatus,
+    refreshNativePush,
     updateNotificationSettings,
     triggerTestNotification,
   } = useFinance();
+
+  const [refreshingPush, setRefreshingPush] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -104,19 +112,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [showPinSetup, setShowPinSetup] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinConfirm, setPinConfirm] = useState('');
+  const [localProfileJustSaved, setLocalProfileJustSaved] = useState(false);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const acc = state.settings.account ?? DEFAULT_ACCOUNT_SECURITY;
-    setProfileName(
-      acc.displayName === 'Mode Invité (Local)' ? '' : acc.displayName
-    );
-    setProfileEmail(acc.email || '');
-    setRemotePassword('');
-    setAvatarDataUrl(acc.avatarDataUrl);
-    setCloudLabel(acc.cloudProviderLabel || 'Supabase');
-    setCloudUrl(acc.cloudSyncUrl || '');
-    setFeedback(null);
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true;
+      const acc = state.settings.account ?? DEFAULT_ACCOUNT_SECURITY;
+      setProfileName(
+        acc.displayName === 'Mode Invité (Local)' ? '' : acc.displayName
+      );
+      setProfileEmail(acc.email || '');
+      setRemotePassword('');
+      setAvatarDataUrl(acc.avatarDataUrl);
+      setCloudLabel(acc.cloudProviderLabel || 'Supabase');
+      setCloudUrl(acc.cloudSyncUrl || '');
+      setFeedback(null);
+      setLocalProfileJustSaved(false);
+    }
 
     if (initialFocusSection === 'profile') {
       window.setTimeout(() => {
@@ -155,8 +172,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    const nextName = profileName.trim() || 'Profil Local';
+    const nextName =
+      profileName.trim() ||
+      (normalizedMode === 'cloud_ready' ? 'Compte Connecté' : 'Profil Local');
+    const confirmedIso = new Date().toISOString();
 
+    setProfileName(nextName);
     updateAccountProfile({
       mode: normalizedMode,
       displayName: nextName,
@@ -168,12 +189,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           : undefined,
       cloudSyncUrl:
         normalizedMode === 'cloud_ready' ? cloudUrl.trim() || undefined : undefined,
+      localProfileConfirmedAt:
+        normalizedMode === 'local_profile'
+          ? confirmedIso
+          : account.localProfileConfirmedAt,
     });
     await haptics.success();
+    if (normalizedMode === 'local_profile') {
+      setLocalProfileJustSaved(true);
+    }
     setFeedback(
       normalizedMode === 'cloud_ready'
         ? 'Profil de Compte Connecté enregistré. La synchronisation se fera automatiquement dès qu’un réseau est détecté.'
-        : 'Profil Local enregistré sur cet appareil (données d’exemple modifiables à tout moment).'
+        : `Profil local « ${nextName} » configuré et enregistré sur cet appareil.`
     );
   };
 
@@ -544,7 +572,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             )}
 
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px] text-zinc-500">
                 {normalizedMode === 'cloud_ready'
                   ? 'Prêt pour connexion à distance et sync auto sur réseau.'
@@ -552,13 +580,49 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
               <button
                 type="submit"
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#F5B971] px-3 text-xs font-bold text-[#08090C] shrink-0"
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#F5B971] px-3.5 text-xs font-bold text-[#08090C] shrink-0 hover:bg-[#f7c587]"
               >
                 <UserCheck className="h-3.5 w-3.5" />
-                <span>Enregistrer</span>
+                <span>
+                  {normalizedMode === 'local_profile'
+                    ? 'Enregistrer & confirmer le profil local'
+                    : 'Enregistrer le profil connecté'}
+                </span>
               </button>
             </div>
           </form>
+
+          {normalizedMode === 'local_profile' &&
+            (localProfileJustSaved || Boolean(account.localProfileConfirmedAt)) && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-2.5 rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs"
+              >
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#10B981]" />
+                <div className="min-w-0 space-y-0.5">
+                  <div className="font-semibold text-[#10B981]">
+                    Profil local configuré et enregistré sur cet appareil
+                  </div>
+                  <div className="text-[11px] text-zinc-300">
+                    Profil : <strong className="text-zinc-100">{account.displayName}</strong>
+                    {account.localProfileConfirmedAt && (
+                      <>
+                        {' · '}
+                        Sauvegardé le{' '}
+                        {new Date(account.localProfileConfirmedAt).toLocaleString('fr-FR', {
+                          day: '2-digit',
+                          month: 'short',
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           {/* Code PIN local optionnel */}
           <div className="border-t border-zinc-800/80 pt-3 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -814,6 +878,113 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
           </div>
 
+          {/* État des Notifications Push Natives Android (FCM) */}
+          <div
+            className={`flex flex-wrap items-center justify-between gap-2.5 rounded-xl border p-3 ${
+              pushStatus.isNative && pushStatus.permission === 'granted'
+                ? 'border-[#10B981]/35 bg-[#10B981]/10'
+                : pushStatus.isNative &&
+                  (pushStatus.permission === 'denied' ||
+                    pushStatus.permission === 'error')
+                ? 'border-[#EF4444]/35 bg-[#EF4444]/10'
+                : 'border-zinc-800 bg-[#121318]'
+            }`}
+          >
+            <div className="flex items-start gap-2.5 min-w-0 flex-1">
+              <Smartphone
+                className={`mt-0.5 h-4 w-4 shrink-0 ${
+                  pushStatus.isNative && pushStatus.permission === 'granted'
+                    ? 'text-[#10B981]'
+                    : pushStatus.isNative &&
+                      (pushStatus.permission === 'denied' ||
+                        pushStatus.permission === 'error')
+                    ? 'text-[#EF4444]'
+                    : 'text-[#F5B971]'
+                }`}
+              />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-100">
+                  {pushStatus.isNative && pushStatus.permission === 'granted' && (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#10B981]" />
+                  )}
+                  <span>
+                    {!pushStatus.isNative
+                      ? 'Push natives Android (FCM) · Mode navigateur'
+                      : pushStatus.permission === 'granted'
+                      ? 'Notifications Push Android actives'
+                      : pushStatus.permission === 'denied'
+                      ? 'Notifications Push Android refusées'
+                      : 'Notifications Push Android en attente'}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[11px] text-zinc-400 leading-relaxed">
+                  {!pushStatus.isNative
+                    ? 'Les alertes push FCM s’activent automatiquement sur l’application Android installée.'
+                    : pushStatus.permission === 'granted'
+                    ? pushStatus.syncedToCloud
+                      ? 'Appareil enregistré sur Supabase. Vous recevrez les alertes d’équipe même application fermée.'
+                      : pushStatus.token
+                      ? 'Jeton FCM prêt. Connectez votre compte Cloud pour recevoir les alertes de projets partagés.'
+                      : 'Permission accordée. Récupération du jeton FCM en cours...'
+                    : pushStatus.lastError ||
+                      'Autorisez les notifications système Android pour recevoir les opérations d’équipe en temps réel.'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={refreshingPush}
+              onClick={async () => {
+                setRefreshingPush(true);
+                void haptics.tap();
+                if (!pushStatus.isNative) {
+                  const webRes = await requestNativeNotificationPermission();
+                  setRefreshingPush(false);
+                  if (webRes === 'granted') {
+                    await haptics.success();
+                    setFeedback('Notifications navigateur autorisées.');
+                  } else {
+                    setFeedback(
+                      'Sur navigateur, les notifications Push FCM restent réservées à l’app Android.'
+                    );
+                  }
+                  return;
+                }
+                const next = await refreshNativePush();
+                setRefreshingPush(false);
+                if (next.permission === 'granted') {
+                  await haptics.success();
+                  setFeedback(
+                    next.syncedToCloud
+                      ? 'Notifications Push Android actives et synchronisées.'
+                      : 'Autorisation Push Android activée.'
+                  );
+                } else {
+                  await haptics.warning();
+                  setFeedback(
+                    next.lastError ||
+                      'Autorisation refusée. Activez les notifications dans les réglages Android de TOMI.'
+                  );
+                }
+              }}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-[#18181B] px-2.5 text-[11px] font-semibold text-zinc-200 hover:border-[#F5B971] disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3 w-3 text-[#F5B971] ${
+                  refreshingPush ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {!pushStatus.isNative
+                  ? 'Vérifier'
+                  : pushStatus.permission === 'granted'
+                  ? 'Actualiser'
+                  : 'Réactiver l’autorisation'}
+              </span>
+            </button>
+          </div>
+
           <div className="divide-y divide-zinc-800/70">
             {[
               {
@@ -880,15 +1051,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <label className="mb-1 block text-[11px] text-zinc-400">
                 Heure du rappel quotidien
               </label>
-              <input
-                type="time"
+              <CustomTimePicker
                 value={notificationSettings.dailyReminderTime}
-                onChange={(e) =>
+                onChange={(val) =>
                   updateNotificationSettings({
-                    dailyReminderTime: e.target.value,
+                    dailyReminderTime: val,
                   })
                 }
-                className="h-10 w-full rounded-xl border border-zinc-800 bg-[#121318] px-3 text-xs text-zinc-100 focus:border-[#F5B971] focus:outline-none"
+                label="Heure du rappel quotidien"
               />
             </div>
             <div>
@@ -899,10 +1069,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 type="number"
                 min="0"
                 step="1000"
-                value={notificationSettings.projectLowBalanceThresholdFbu}
+                value={notificationSettings.lowTreasuryThresholdFbu}
                 onChange={(e) =>
                   updateNotificationSettings({
-                    projectLowBalanceThresholdFbu:
+                    lowTreasuryThresholdFbu:
                       parseFloat(e.target.value) || 0,
                   })
                 }

@@ -24,6 +24,8 @@ const CATEGORY_LABELS: Record<NotificationCategory, string> = {
   projects_redline: 'Projet',
   ai_reports: 'IA Coach',
   daily_entry: 'Routine',
+  low_stock: 'Stock faible',
+  shared_activity: 'Équipe projet',
 };
 
 export const NotificationsModal: React.FC<NotificationsModalProps> = ({
@@ -39,6 +41,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
     markAllNotificationsRead,
     dismissNotification,
     clearReadNotifications,
+    requestOpenProject,
   } = useFinance();
 
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
@@ -53,6 +56,10 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
     onClose();
     if (item.category === 'daily_entry') {
       onOpenQuickEntry();
+      return;
+    }
+    if (item.targetProjectId) {
+      requestOpenProject(item.targetProjectId);
       return;
     }
     if (item.targetTab) {

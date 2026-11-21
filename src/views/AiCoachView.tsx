@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Send, Sparkles, TrendingUp, AlertTriangle, Trash2 } from 'lucide-react';
+import { AlertTriangle, Boxes, Send, Sparkles, Trash2, TrendingUp } from 'lucide-react';
 import { SegmentedProgressBar } from '../components/SegmentedBar';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { useFinance } from '../store/FinanceContext';
@@ -8,6 +8,7 @@ import { formatInDisplayCurrency } from '../utils/format';
 
 const SUGGESTED_QUESTIONS = [
   'Dans quel projet investir davantage ?',
+  'Quel est l’état de mes stocks et marges produits ?',
   'Quels projets sont sur la ligne rouge ?',
   'Quelle est ma répartition Cash vs Banque ?',
   'Quel est l’état de mes dettes et prêts internes ?',
@@ -136,7 +137,7 @@ export const AiCoachView: React.FC = () => {
             {periodMetrics.projectMetrics.length > 0 && (
               <div className="border-t border-zinc-800/70 pt-3.5 space-y-2.5">
                 <div className="text-xs font-semibold text-zinc-300">
-                  État par projet
+                  État par projet (Résultat net réel &amp; Stock)
                 </div>
                 <div className="divide-y divide-zinc-800/60">
                   {periodMetrics.projectMetrics.map((pm) => (
@@ -149,17 +150,52 @@ export const AiCoachView: React.FC = () => {
                           {pm.project.name}
                         </span>
                         <StatusIndicator status={pm.status} label={pm.statusLabel} />
+                        {pm.stockValueFbu > 0 && (
+                          <span className="hidden sm:inline font-mono-num text-[11px] text-[#F5B971]">
+                            · Stock {fmt(pm.stockValueFbu)}
+                          </span>
+                        )}
                       </div>
                       <span
                         className={`font-mono-num font-semibold shrink-0 ${
-                          pm.netFlowFbu >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
+                          pm.netResultFbu >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
                         }`}
                       >
-                        {fmt(pm.netFlowFbu, { signed: true })}
+                        {fmt(pm.netResultFbu, { signed: true })}
                       </span>
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Inventory & Margin Summary */}
+            {(report.totalStockValueFbu > 0 || report.lowStockAlerts.length > 0) && (
+              <div className="border-t border-zinc-800/70 pt-3.5 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-300">
+                    <Boxes className="h-3.5 w-3.5 text-[#F5B971]" />
+                    <span>Capital immobilisé en stock</span>
+                  </span>
+                  <span className="font-mono-num font-bold text-[#F5B971]">
+                    {fmt(report.totalStockValueFbu)}
+                  </span>
+                </div>
+                {report.topProductInsight && (
+                  <p className="text-[11px] text-zinc-400">
+                    Top rotation :{' '}
+                    <strong className="text-zinc-200">
+                      {report.topProductInsight.itemName}
+                    </strong>{' '}
+                    ({report.topProductInsight.soldQty} {report.topProductInsight.unit}{' '}
+                    vendus · marge {report.topProductInsight.marginPercent}%)
+                  </p>
+                )}
+                {report.lowStockAlerts.length > 0 && (
+                  <p className="text-[11px] text-[#EF4444]">
+                    ⚠ {report.lowStockAlerts.length} alerte(s) de stock faible à réapprovisionner.
+                  </p>
+                )}
               </div>
             )}
           </section>

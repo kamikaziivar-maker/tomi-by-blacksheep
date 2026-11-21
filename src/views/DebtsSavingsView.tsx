@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import { Minus, Plus, Trash2 } from 'lucide-react';
+import { CustomDatePicker } from '../components/CustomDatePicker';
+import { CustomSelect } from '../components/CustomSelect';
 import { SegmentedProgressBar } from '../components/SegmentedBar';
+import { SupportAvatar } from '../components/SupportAvatar';
 import { useFinance } from '../store/FinanceContext';
 import {
   convertToFbu,
   formatInDisplayCurrency,
+  formatMoney,
   formatShortDate,
   getTodayISO,
 } from '../utils/format';
@@ -200,37 +204,45 @@ export const DebtsSavingsView: React.FC = () => {
                 onChange={(e) => setDebtAmount(e.target.value)}
                 className="col-span-2 h-10 rounded-lg border border-zinc-800 bg-[#141417] px-3 font-mono-num text-sm text-zinc-100"
               />
-              <select
+              <CustomSelect
                 value={debtCurrency}
-                onChange={(e) => setDebtCurrency(e.target.value)}
-                className="h-10 rounded-lg border border-zinc-800 bg-[#141417] px-2 text-xs font-semibold text-[#F5B971]"
-              >
-                {currencies.map((c) => (
-                  <option key={c.code} value={c.code}>
-                    {c.code}
-                  </option>
-                ))}
-              </select>
+                onChange={(val) => setDebtCurrency(val)}
+                title="Devise"
+                searchable={false}
+                options={currencies.map((c) => ({
+                  value: c.code,
+                  label: `${c.code} — ${c.name}`,
+                  badge: c.symbol,
+                }))}
+                renderSelected={(opt) => (
+                  <span className="font-mono-num text-xs font-semibold text-[#F5B971]">
+                    {opt?.value || debtCurrency}
+                  </span>
+                )}
+                className="h-10 w-full rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs font-semibold text-[#F5B971] hover:border-zinc-700"
+              />
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[11px] text-zinc-500">Date</label>
-                <input
-                  type="date"
+                <CustomDatePicker
                   value={debtDate}
-                  onChange={(e) => setDebtDate(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-zinc-800 bg-[#141417] px-3 text-xs text-zinc-100"
+                  onChange={(val) => setDebtDate(val)}
+                  label="Date de l’opération"
+                  className="h-10 w-full rounded-lg border border-zinc-800 bg-[#141417] px-3 text-xs text-zinc-100 hover:border-zinc-700"
                 />
               </div>
               <div>
                 <label className="mb-1 block text-[11px] text-zinc-500">
                   Échéance / rappel (optionnel)
                 </label>
-                <input
-                  type="date"
+                <CustomDatePicker
                   value={debtDueDate}
-                  onChange={(e) => setDebtDueDate(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-zinc-800 bg-[#141417] px-3 text-xs text-zinc-100"
+                  onChange={(val) => setDebtDueDate(val)}
+                  label="Date d’échéance / rappel"
+                  placeholder="Aucune échéance"
+                  clearable
+                  className="h-10 w-full rounded-lg border border-zinc-800 bg-[#141417] px-3 text-xs text-zinc-100 hover:border-zinc-700"
                 />
               </div>
             </div>
@@ -334,18 +346,25 @@ export const DebtsSavingsView: React.FC = () => {
                               onChange={(e) => setRepayAmount(e.target.value)}
                               className="h-9 rounded-lg border border-zinc-700 bg-[#141417] px-2.5 font-mono-num text-xs text-zinc-100"
                             />
-                            <select
+                            <CustomSelect
                               value={repaySupportId}
-                              onChange={(e) => setRepaySupportId(e.target.value)}
-                              className="h-9 rounded-lg border border-zinc-700 bg-[#141417] px-2 text-xs text-zinc-200"
-                            >
-                              <option value="">Sans mouvement de compte</option>
-                              {state.supports.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name}
-                                </option>
-                              ))}
-                            </select>
+                              onChange={(val) => setRepaySupportId(val)}
+                              title="Support / compte utilisé"
+                              options={[
+                                {
+                                  value: '',
+                                  label: 'Sans mouvement de compte',
+                                  sublabel: 'Mettre à jour uniquement le suivi',
+                                },
+                                ...state.supports.map((s) => ({
+                                  value: s.id,
+                                  label: s.name,
+                                  badge: formatMoney(s.balance, s.currency, currencies),
+                                  icon: <SupportAvatar support={s} size="sm" />,
+                                })),
+                              ]}
+                              className="h-9 w-full rounded-lg border border-zinc-700 bg-[#141417] px-2.5 text-xs text-zinc-200 hover:border-zinc-600"
+                            />
                           </div>
                           <div className="flex justify-end gap-2">
                             <button
@@ -538,18 +557,25 @@ export const DebtsSavingsView: React.FC = () => {
                           onChange={(e) => setAdjustAmount(e.target.value)}
                           className="h-9 rounded-lg border border-zinc-700 bg-[#141417] px-2.5 font-mono-num text-xs text-zinc-100"
                         />
-                        <select
+                        <CustomSelect
                           value={adjustSupportId}
-                          onChange={(e) => setAdjustSupportId(e.target.value)}
-                          className="h-9 rounded-lg border border-zinc-700 bg-[#141417] px-2 text-xs text-zinc-200"
-                        >
-                          <option value="">Suivi objectif seul</option>
-                          {state.supports.map((s) => (
-                            <option key={s.id} value={s.id}>
-                              {s.name}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={(val) => setAdjustSupportId(val)}
+                          title="Support / compte associé"
+                          options={[
+                            {
+                              value: '',
+                              label: 'Suivi objectif seul',
+                              sublabel: 'Sans mouvement sur vos supports',
+                            },
+                            ...state.supports.map((s) => ({
+                              value: s.id,
+                              label: s.name,
+                              badge: formatMoney(s.balance, s.currency, currencies),
+                              icon: <SupportAvatar support={s} size="sm" />,
+                            })),
+                          ]}
+                          className="h-9 w-full rounded-lg border border-zinc-700 bg-[#141417] px-2.5 text-xs text-zinc-200 hover:border-zinc-600"
+                        />
                       </div>
                       <div className="flex justify-end gap-2">
                         <button

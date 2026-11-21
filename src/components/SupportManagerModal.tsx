@@ -1,10 +1,47 @@
 import React, { useState } from 'react';
-import { Pencil, Plus, Trash2, X } from 'lucide-react';
+import {
+  Banknote,
+  Calculator,
+  Landmark,
+  Pencil,
+  Plus,
+  Smartphone,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useFinance } from '../store/FinanceContext';
 import { FundSupport, SupportType } from '../types/finance';
-import { formatMoney } from '../utils/format';
+import {
+  formatMoney,
+  parseSignedAmount,
+  sanitizeSignedNumberInput,
+  toggleSignedInput,
+} from '../utils/format';
 import { haptics } from '../utils/haptics';
+import { CalculatorModal } from './CalculatorModal';
+import { CustomSelect, CustomSelectOption } from './CustomSelect';
 import { SupportAvatar } from './SupportAvatar';
+
+const SUPPORT_TYPE_OPTIONS: CustomSelectOption[] = [
+  {
+    value: SupportType.CASH,
+    label: 'Cash (Liquide)',
+    sublabel: 'Caisse espèces ou portefeuille',
+    icon: <Banknote className="h-4 w-4 text-zinc-300" />,
+  },
+  {
+    value: SupportType.BANK,
+    label: 'Compte bancaire',
+    sublabel: 'Banque classique ou épargne',
+    icon: <Landmark className="h-4 w-4 text-[#F5B971]" />,
+  },
+  {
+    value: SupportType.MOBILE_MONEY,
+    label: 'Mobile Money',
+    sublabel: 'Lumicash, Ecocash, M-Pesa...',
+    icon: <Smartphone className="h-4 w-4 text-[#10B981]" />,
+  },
+];
 
 interface SupportManagerModalProps {
   isOpen: boolean;
@@ -29,6 +66,7 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
   const [reference, setReference] = useState('');
   const [currency, setCurrency] = useState('FBU');
   const [balance, setBalance] = useState('');
+  const [calcOpen, setCalcOpen] = useState(false);
 
   if (!isOpen) return null;
 
@@ -58,7 +96,7 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    const numBal = parseFloat(balance) || 0;
+    const numBal = parseSignedAmount(balance);
 
     if (editingId) {
       updateSupport(editingId, {
@@ -145,7 +183,11 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono-num text-sm font-semibold text-zinc-100">
+                  <span
+                    className={`font-mono-num text-sm font-semibold ${
+                      s.balance < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+                    }`}
+                  >
                     {formatMoney(s.balance, s.currency, state.settings.currencies)}
                   </span>
                   <button
@@ -193,26 +235,31 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
           </div>
 
           <div className="grid grid-cols-2 gap-2.5">
-            <select
+            <CustomSelect
               value={type}
-              onChange={(e) => setType(e.target.value as SupportType)}
-              className="h-11 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs font-medium text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-            >
-              <option value={SupportType.CASH}>Cash (Liquide)</option>
-              <option value={SupportType.BANK}>Compte bancaire</option>
-              <option value={SupportType.MOBILE_MONEY}>Mobile Money</option>
-            </select>
-            <select
+              onChange={(val) => setType(val as SupportType)}
+              options={SUPPORT_TYPE_OPTIONS}
+              title="Type de support"
+              searchable={false}
+              className="h-11 w-full rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs font-medium text-zinc-100 hover:border-zinc-700"
+            />
+            <CustomSelect
               value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
-              className="h-11 rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs font-semibold text-[#F5B971] focus:border-[#F5B971] focus:outline-none"
-            >
-              {state.settings.currencies.map((c) => (
-                <option key={c.code} value={c.code}>
-                  {c.code} — {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={(val) => setCurrency(val)}
+              title="Devise du compte"
+              searchable={false}
+              options={state.settings.currencies.map((c) => ({
+                value: c.code,
+                label: `${c.code} — ${c.name}`,
+                badge: c.symbol,
+              }))}
+              renderSelected={(opt) => (
+                <span className="truncate font-semibold text-[#F5B971]">
+                  {opt ? opt.label : currency}
+                </span>
+              )}
+              className="h-11 w-full rounded-xl border border-zinc-800 bg-[#08090C] px-3 text-xs font-semibold text-[#F5B971] hover:border-zinc-700"
+            />
           </div>
 
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -233,25 +280,73 @@ export const SupportManagerModal: React.FC<SupportManagerModalProps> = ({
             />
           </div>
 
-          <div className="flex gap-2.5">
-            <input
-              type="number"
-              step="any"
-              placeholder="Solde actuel"
-              value={balance}
-              onChange={(e) => setBalance(e.target.value)}
-              className="h-11 flex-1 rounded-xl border border-zinc-800 bg-[#08090C] px-3 font-mono-num text-sm text-zinc-100 focus:border-[#F5B971] focus:outline-none"
-            />
-            <button
-              type="submit"
-              className="inline-flex h-11 items-center gap-1.5 rounded-xl bg-[#F5B971] px-4 text-xs font-bold text-[#08090C] hover:bg-[#f7c587]"
-            >
-              <Plus className="h-4 w-4" />
-              <span>{editingId ? 'Mettre à jour' : 'Ajouter'}</span>
-            </button>
+          <div className="space-y-1.5">
+            <div className="flex gap-2">
+              <div className="flex flex-1 items-center gap-1.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void haptics.tap();
+                    setBalance((prev) => toggleSignedInput(prev));
+                  }}
+                  aria-label="Basculer signe positif ou négatif"
+                  title="Changer le signe (+ / -)"
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border font-mono-num text-sm font-bold transition-colors ${
+                    balance.trim().startsWith('-')
+                      ? 'border-[#EF4444]/60 bg-[#EF4444]/15 text-[#EF4444]'
+                      : 'border-zinc-800 bg-[#08090C] text-zinc-300 hover:border-[#F5B971]/60 hover:text-[#F5B971]'
+                  }`}
+                >
+                  +/−
+                </button>
+                <input
+                  type="text"
+                  inputMode="text"
+                  placeholder="Solde (ex: 150000 ou -150000)"
+                  value={balance}
+                  onChange={(e) => setBalance(sanitizeSignedNumberInput(e.target.value))}
+                  className={`h-11 min-w-0 flex-1 rounded-xl border bg-[#08090C] px-3 font-mono-num text-sm focus:border-[#F5B971] focus:outline-none ${
+                    balance.trim().startsWith('-')
+                      ? 'border-[#EF4444]/50 text-[#EF4444]'
+                      : 'border-zinc-800 text-zinc-100'
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void haptics.tap();
+                    setCalcOpen(true);
+                  }}
+                  aria-label="Ouvrir la calculatrice"
+                  title="Calculer le solde"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-800 bg-[#08090C] text-[#F5B971] hover:border-[#F5B971]/60"
+                >
+                  <Calculator className="h-4 w-4" />
+                </button>
+              </div>
+              <button
+                type="submit"
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-xl bg-[#F5B971] px-4 text-xs font-bold text-[#08090C] hover:bg-[#f7c587]"
+              >
+                <Plus className="h-4 w-4" />
+                <span>{editingId ? 'Mettre à jour' : 'Ajouter'}</span>
+              </button>
+            </div>
+            {balance.trim().startsWith('-') && (
+              <p className="text-[11px] text-[#EF4444]">
+                Solde négatif / à découvert : pris en compte et déduit du solde global.
+              </p>
+            )}
           </div>
         </form>
       </div>
+
+      <CalculatorModal
+        isOpen={calcOpen}
+        onClose={() => setCalcOpen(false)}
+        allowNegative
+        onApplyValue={(val) => setBalance(String(val))}
+      />
     </div>
   );
 };

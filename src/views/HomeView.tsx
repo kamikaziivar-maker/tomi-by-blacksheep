@@ -130,7 +130,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   ? `Connecté · ${account.email}`
                   : 'Profil synchronisé'
                 : account.mode === 'local_profile'
-                ? 'Profil local · Hors ligne'
+                ? account.localProfileConfirmedAt
+                  ? 'Profil local confirmé · Hors ligne'
+                  : 'Profil local · Hors ligne'
                 : 'Mode Invité · Toucher pour configurer'}
             </p>
           </div>
@@ -217,7 +219,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <span>Solde total géré</span>
             <Wallet className="h-4 w-4 text-[#F5B971]" />
           </div>
-          <div className="mt-2 font-mono-num text-2xl font-bold tracking-tight text-zinc-100">
+          <div
+            className={`mt-2 font-mono-num text-2xl font-bold tracking-tight ${
+              metrics.totalManagedFbu < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+            }`}
+          >
             {fmt(metrics.totalManagedFbu)}
           </div>
           <div className="mt-1.5 flex items-center gap-2 text-xs">
@@ -230,13 +236,19 @@ export const HomeView: React.FC<HomeViewProps> = ({
         {/* KPI 2: Cash Dispo */}
         <div className="rounded-2xl border border-zinc-800/80 bg-[#141417] p-4">
           <div className="text-xs text-zinc-400">Dispo en liquide (Cash)</div>
-          <div className="mt-2 font-mono-num text-xl font-bold text-zinc-100 sm:text-2xl">
+          <div
+            className={`mt-2 font-mono-num text-xl font-bold sm:text-2xl ${
+              metrics.totalCashFbu < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+            }`}
+          >
             {fmt(metrics.totalCashFbu)}
           </div>
           <div className="mt-1.5 text-xs text-zinc-500">
             {privacyMode
               ? '••% du solde total'
-              : metrics.totalManagedFbu > 0
+              : metrics.totalCashFbu < 0
+              ? 'Solde Cash négatif / découvert'
+              : metrics.totalManagedFbu > 0 && metrics.totalBankMomoFbu >= 0
               ? `${Math.round((metrics.totalCashFbu / metrics.totalManagedFbu) * 100)}% du solde total`
               : 'Perso + Projets'}
           </div>
@@ -245,7 +257,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
         {/* KPI 3: Banque & Mobile Money */}
         <div className="rounded-2xl border border-zinc-800/80 bg-[#141417] p-4">
           <div className="text-xs text-zinc-400">Banque &amp; Mobile Money</div>
-          <div className="mt-2 font-mono-num text-xl font-bold text-[#10B981] sm:text-2xl">
+          <div
+            className={`mt-2 font-mono-num text-xl font-bold sm:text-2xl ${
+              metrics.totalBankMomoFbu < 0 ? 'text-[#EF4444]' : 'text-[#10B981]'
+            }`}
+          >
             {fmt(metrics.totalBankMomoFbu)}
           </div>
           <div className="mt-1.5 text-xs text-zinc-500">
@@ -339,7 +355,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <div className="text-right">
-                <div className="font-mono-num text-base font-bold text-zinc-100">
+                <div
+                  className={`font-mono-num text-base font-bold ${
+                    metrics.totalPersonalFbu < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+                  }`}
+                >
                   {fmt(metrics.totalPersonalFbu)}
                 </div>
                 <div
@@ -400,7 +420,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
                           </div>
                         </div>
                         <div className="text-right font-mono-num shrink-0 ml-3">
-                          <div className="font-semibold text-zinc-100">
+                          <div
+                            className={`font-semibold ${
+                              sup.balance < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+                            }`}
+                          >
                             {fmtSupport(sup.balance, sup.currency)}
                           </div>
                           {sup.currency !== displayCurrency && (
@@ -492,7 +516,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-              <div className="text-right font-mono-num text-base font-bold text-zinc-100">
+              <div
+                className={`text-right font-mono-num text-base font-bold ${
+                  metrics.totalProjectsFbu < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+                }`}
+              >
                 {fmt(metrics.totalProjectsFbu)}
               </div>
               {expanded.projects ? (
@@ -534,7 +562,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
                           </p>
                         </div>
                         <div className="text-right font-mono-num shrink-0">
-                          <div className="text-sm font-bold text-zinc-100">
+                          <div
+                            className={`text-sm font-bold ${
+                              pm.totalBalanceFbu < 0 ? 'text-[#EF4444]' : 'text-zinc-100'
+                            }`}
+                          >
                             {fmt(pm.totalBalanceFbu)}
                           </div>
                           <div

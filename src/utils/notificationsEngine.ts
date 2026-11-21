@@ -127,17 +127,17 @@ export function evaluateSmartNotifications(state: FinanceState): NotificationIte
     }
   }
 
-  // 3. Projets / Ligne rouge & seuil bas de trésorerie
+  // 3. Projets / Ligne rouge, seuil bas de trésorerie & stocks faibles
+  const metrics = computeFinanceMetrics(state);
   if (cfg.projectsRedlineEnabled) {
-    const metrics = computeFinanceMetrics(state);
     for (const pm of metrics.projectMetrics) {
-      if (pm.netFlowFbu < 0) {
+      if (pm.netResultFbu < 0) {
         candidates.push({
           id: generateId('notif'),
-          dedupeKey: `proj_redline_${pm.project.id}_${pm.netFlowFbu}`,
+          dedupeKey: `proj_redline_${pm.project.id}_${pm.netResultFbu}`,
           category: 'projects_redline',
           title: `Alerte Ligne rouge — ${pm.project.name}`,
-          message: `Flux net négatif de ${fmt(pm.netFlowFbu)} sur la période. Vérifiez les postes de dépenses.`,
+          message: `Résultat net négatif de ${fmt(pm.netResultFbu)} sur la période. Vérifiez vos charges d’exploitation.`,
           severity: 'danger',
           createdAt: nowIso,
           read: false,
@@ -158,6 +158,22 @@ export function evaluateSmartNotifications(state: FinanceState): NotificationIte
           targetTab: 'projects',
           targetProjectId: pm.project.id,
           actionLabel: 'Voir le projet',
+        });
+      }
+
+      for (const item of pm.lowStockItems) {
+        candidates.push({
+          id: generateId('notif'),
+          dedupeKey: `low_stock_${pm.project.id}_${item.id}_${item.quantity}`,
+          category: 'low_stock',
+          title: `Stock faible — ${item.name} (${pm.project.name})`,
+          message: `Reste ${item.quantity} ${item.unit} (seuil d’alerte : ${item.minStockThreshold}). Pensez à réapprovisionner.`,
+          severity: item.quantity <= 0 ? 'danger' : 'warning',
+          createdAt: nowIso,
+          read: false,
+          targetTab: 'projects',
+          targetProjectId: pm.project.id,
+          actionLabel: 'Voir le stock',
         });
       }
     }

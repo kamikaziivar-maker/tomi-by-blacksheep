@@ -13,13 +13,20 @@ import {
   FinanceState,
   FundSupport,
   InternalLoan,
+  InventoryItem,
   NotificationItem,
   NotificationSettings,
   PaymentMethod,
   PocketTarget,
   Project,
+  ProjectMember,
+  ProjectOutflowNature,
+  ProjectRole,
   SavingsGoal,
   ShakeSensitivity,
+  SharedProjectSyncOp,
+  StockPurchaseLine,
+  StockSaleLine,
   SupportType,
   TimePeriod,
   Transaction,
@@ -27,11 +34,22 @@ import {
 } from '../types/finance';
 import { answerCoachQuestion, computeFinanceMetrics, GlobalMetrics } from '../utils/aiEngine';
 import { convertFromFbu, convertToFbu, generateId, getTodayISO } from '../utils/format';
+import { haptics } from '../utils/haptics';
 import {
   evaluateSmartNotifications,
   getNotificationSettings,
   sendNativeNotificationIfPermitted,
 } from '../utils/notificationsEngine';
+import {
+  cleanupNativePushListeners,
+  getPushStatusSnapshot,
+  initNativePushNotifications,
+  PushStatusSnapshot,
+  refreshPushNotifications,
+  removeCachedPushTokenFromSupabase,
+  subscribePushStatus,
+  syncPushTokenWithSupabase,
+} from '../utils/pushNotifications';
 import {
   hashPin,
   isIndexedDbSupported,
@@ -41,6 +59,7 @@ import {
   writeToIndexedDb,
   writeToLocalStorage,
 } from '../utils/storage';
+import { isSupabaseConfigured, supabase } from '../utils/supabaseClient';
 
 export interface QuickTransactionInput {
   type: TransactionType;
@@ -59,6 +78,9 @@ export interface QuickTransactionInput {
   note?: string;
   reminderDate?: string;
   reminderDelayDays?: number;
+  outflowNature?: ProjectOutflowNature;
+  stockPurchaseLines?: StockPurchaseLine[];
+  stockSaleLines?: StockSaleLine[];
 }
 
 export interface ProjectFormInput {
@@ -69,6 +91,21 @@ export interface ProjectFormInput {
   revenueSources: string[];
   expenseCategories: string[];
   initialSupports?: Omit<FundSupport, 'id' | 'ownerType' | 'ownerId'>[];
+}
+
+function getInitials(name?: string): string {
+  const clean = (name || 'Moi').trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return clean.slice(0, 2).toUpperCase() || 'TM';
+}
+
+function generateInviteCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const pick = () => chars[Math.floor(Math.random() * chars.length)];
+  return `TOMI-${pick()}${pick()}${pick()}${pick()}-${pick()}${pick()}${pick()}${pick()}`;
 }
 
 interface FinanceContextValue {
@@ -84,11 +121,38 @@ interface FinanceContextValue {
   updateSupport: (id: string, patch: Partial<Omit<FundSupport, 'id' | 'ownerType' | 'ownerId'>>) => void;
   deleteSupport: (id: string) => void;
 
-  // Projects
+  // Projects, Inventory & Isolated Collaboration
   addProject: (input: ProjectFormInput) => string;
   updateProject: (id: string, patch: Partial<Omit<Project, 'id' | 'createdAt'>>) => void;
   deleteProject: (id: string) => void;
   addProjectTag: (projectId: string, kind: 'revenue' | 'expense', value: string) => void;
+  getProjectRole: (projectId: string) => ProjectRole;
+  upsertInventoryItem: (input: {
+    id?: string;
+    projectId: string;
+    name: string;
+    unit: string;
+    quantity: number;
+    minStockThreshold: number;
+    averageUnitCostFbu: number;
+  }) => void;
+  updateInventoryThreshold: (itemId: string, minStockThreshold: number) => void;
+  deleteInventoryItem: (itemId: string) => void;
+  enableProjectSharing: (
+    projectId: string
+  ) => Promise<{ ok: boolean; inviteCode?: string; message?: string }>;
+  inviteProjectMember: (params: {
+    projectId: string;
+    email: string;
+    displayName: string;
+    role: ProjectRole;
+  }) => Promise<{ ok: boolean; message: string }>;
+  updateProjectMemberRole: (memberId: string, role: ProjectRole) => Promise<void>;
+  removeProjectMember: (memberId: string) => Promise<void>;
+  joinSharedProjectByCode: (
+    inviteCode: string
+  ) => Promise<{ ok: boolean; message: string; projectId?: string }>;
+  syncSharedProjectsNow: () => Promise<{ ok: boolean; message: string }>;
 
   // Transactions & Internal Loans
   addQuickTransaction: (input: QuickTransactionInput) => void;
@@ -189,11 +253,21 @@ interface FinanceContextValue {
   customLogoDataUrl?: string;
   setCustomLogoDataUrl: (dataUrl?: string) => void;
 
-  // Smart Notifications & Reminders
+  // Smart Notifications & Native Android Push (FCM)
   notifications: NotificationItem[];
   unreadNotificationsCount: number;
   notificationSettings: NotificationSettings;
-  notificationToast: { title: string; message: string; severity: 'info' | 'warning' | 'danger' } | null;
+  notificationToast: {
+    title: string;
+    message: string;
+    severity: 'info' | 'warning' | 'danger';
+    projectId?: string;
+  } | null;
+  pushStatus: PushStatusSnapshot;
+  pendingProjectNavigationId: string | null;
+  requestOpenProject: (projectId: string) => void;
+  clearPendingProjectNavigation: () => void;
+  refreshNativePush: () => Promise<PushStatusSnapshot>;
   updateNotificationSettings: (patch: Partial<NotificationSettings>) => void;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
@@ -229,6 +303,9 @@ function normalizeLoadedState(parsed: Partial<FinanceState>): FinanceState {
     },
     supports: Array.isArray(parsed.supports) ? parsed.supports : EMPTY_FINANCE_STATE.supports,
     projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+    inventoryItems: Array.isArray(parsed.inventoryItems) ? parsed.inventoryItems : [],
+    projectMembers: Array.isArray(parsed.projectMembers) ? parsed.projectMembers : [],
+    pendingSyncQueue: Array.isArray(parsed.pendingSyncQueue) ? parsed.pendingSyncQueue : [],
     transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
     internalLoans: Array.isArray(parsed.internalLoans) ? parsed.internalLoans : [],
     debts: Array.isArray(parsed.debts) ? parsed.debts : [],
@@ -274,8 +351,25 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     title: string;
     message: string;
     severity: 'info' | 'warning' | 'danger';
+    projectId?: string;
   } | null>(null);
   const notifToastTimerRef = useRef<number | null>(null);
+
+  const [pushStatus, setPushStatus] = useState<PushStatusSnapshot>(() =>
+    getPushStatusSnapshot()
+  );
+  const [pendingProjectNavigationId, setPendingProjectNavigationId] = useState<
+    string | null
+  >(null);
+
+  const requestOpenProject = (projectId: string) => {
+    if (!projectId) return;
+    setPendingProjectNavigationId(projectId);
+  };
+
+  const clearPendingProjectNavigation = () => {
+    setPendingProjectNavigationId(null);
+  };
 
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>(() => ({
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
@@ -374,6 +468,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     state.internalLoans,
     state.debts,
     state.projects,
+    state.inventoryItems,
     state.transactions,
     state.supports,
     state.settings.notifications,
@@ -500,20 +595,35 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return id;
   };
 
+  const getProjectRole = (projectId: string): ProjectRole => {
+    const proj = state.projects.find((p) => p.id === projectId);
+    return proj?.sharedAccessRole ?? 'owner';
+  };
+
   const updateProject = (id: string, patch: Partial<Omit<Project, 'id' | 'createdAt'>>) => {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)),
-    }));
+    setState((prev) => {
+      const target = prev.projects.find((p) => p.id === id);
+      if (target?.sharedAccessRole && target.sharedAccessRole !== 'owner') return prev;
+      return {
+        ...prev,
+        projects: prev.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+      };
+    });
   };
 
   const deleteProject = (id: string) => {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.filter((p) => p.id !== id),
-      supports: prev.supports.filter((s) => !(s.ownerType === 'project' && s.ownerId === id)),
-      internalLoans: prev.internalLoans.filter((l) => l.projectId !== id),
-    }));
+    setState((prev) => {
+      const target = prev.projects.find((p) => p.id === id);
+      if (target?.sharedAccessRole && target.sharedAccessRole !== 'owner') return prev;
+      return {
+        ...prev,
+        projects: prev.projects.filter((p) => p.id !== id),
+        supports: prev.supports.filter((s) => !(s.ownerType === 'project' && s.ownerId === id)),
+        inventoryItems: (prev.inventoryItems ?? []).filter((i) => i.projectId !== id),
+        projectMembers: (prev.projectMembers ?? []).filter((m) => m.projectId !== id),
+        internalLoans: prev.internalLoans.filter((l) => l.projectId !== id),
+      };
+    });
   };
 
   const addProjectTag = (projectId: string, kind: 'revenue' | 'expense', value: string) => {
@@ -523,6 +633,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...prev,
       projects: prev.projects.map((p) => {
         if (p.id !== projectId) return p;
+        if (p.sharedAccessRole === 'viewer') return p;
         if (kind === 'revenue') {
           if (p.revenueSources.includes(clean)) return p;
           return { ...p, revenueSources: [...p.revenueSources, clean] };
@@ -533,16 +644,154 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }));
   };
 
+  const upsertInventoryItem: FinanceContextValue['upsertInventoryItem'] = (input) => {
+    const nowIso = new Date().toISOString();
+    let savedItem: InventoryItem | null = null;
+    let projectIsShared = false;
+
+    setState((prev) => {
+      const proj = prev.projects.find((p) => p.id === input.projectId);
+      if (proj?.sharedAccessRole === 'viewer') return prev;
+      projectIsShared = Boolean(proj?.isShared);
+
+      const list = [...(prev.inventoryItems ?? [])];
+      const cleanName = input.name.trim();
+      if (!cleanName) return prev;
+
+      const existingIdx = list.findIndex(
+        (i) =>
+          (input.id && i.id === input.id) ||
+          (i.projectId === input.projectId &&
+            i.name.trim().toLowerCase() === cleanName.toLowerCase())
+      );
+
+      if (existingIdx >= 0) {
+        const current = list[existingIdx];
+        const nextQty = Math.max(0, input.quantity);
+        const deltaPurchased = Math.max(0, nextQty - current.quantity);
+        const updated: InventoryItem = {
+          ...current,
+          name: cleanName,
+          unit: input.unit.trim() || current.unit,
+          quantity: nextQty,
+          minStockThreshold: Math.max(0, input.minStockThreshold),
+          averageUnitCostFbu: Math.max(0, Math.round(input.averageUnitCostFbu)),
+          totalPurchasedQty: current.totalPurchasedQty + deltaPurchased,
+          updatedAt: nowIso,
+        };
+        list[existingIdx] = updated;
+        savedItem = updated;
+      } else {
+        const created: InventoryItem = {
+          id: input.id || generateId('inv'),
+          projectId: input.projectId,
+          name: cleanName,
+          unit: input.unit.trim() || 'pièce',
+          quantity: Math.max(0, input.quantity),
+          minStockThreshold: Math.max(0, input.minStockThreshold),
+          averageUnitCostFbu: Math.max(0, Math.round(input.averageUnitCostFbu)),
+          totalPurchasedQty: Math.max(0, input.quantity),
+          totalSoldQty: 0,
+          totalSalesRevenueFbu: 0,
+          totalCogsFbu: 0,
+          updatedAt: nowIso,
+        };
+        list.unshift(created);
+        savedItem = created;
+      }
+
+      const nextQueue: SharedProjectSyncOp[] =
+        projectIsShared && savedItem
+          ? [
+              ...(prev.pendingSyncQueue ?? []),
+              {
+                id: generateId('sync'),
+                projectId: input.projectId,
+                kind: 'upsert_inventory',
+                payload: savedItem,
+                createdAt: nowIso,
+              },
+            ]
+          : prev.pendingSyncQueue ?? [];
+
+      return {
+        ...prev,
+        inventoryItems: list,
+        pendingSyncQueue: nextQueue,
+      };
+    });
+  };
+
+  const updateInventoryThreshold = (itemId: string, minStockThreshold: number) => {
+    const nowIso = new Date().toISOString();
+    setState((prev) => {
+      const list = prev.inventoryItems ?? [];
+      const target = list.find((i) => i.id === itemId);
+      if (!target) return prev;
+      const proj = prev.projects.find((p) => p.id === target.projectId);
+      if (proj?.sharedAccessRole === 'viewer') return prev;
+
+      const updated: InventoryItem = {
+        ...target,
+        minStockThreshold: Math.max(0, minStockThreshold),
+        updatedAt: nowIso,
+      };
+
+      const nextQueue: SharedProjectSyncOp[] = proj?.isShared
+        ? [
+            ...(prev.pendingSyncQueue ?? []),
+            {
+              id: generateId('sync'),
+              projectId: target.projectId,
+              kind: 'upsert_inventory',
+              payload: updated,
+              createdAt: nowIso,
+            },
+          ]
+        : prev.pendingSyncQueue ?? [];
+
+      return {
+        ...prev,
+        inventoryItems: list.map((i) => (i.id === itemId ? updated : i)),
+        pendingSyncQueue: nextQueue,
+      };
+    });
+  };
+
+  const deleteInventoryItem = (itemId: string) => {
+    setState((prev) => {
+      const target = (prev.inventoryItems ?? []).find((i) => i.id === itemId);
+      if (!target) return prev;
+      const proj = prev.projects.find((p) => p.id === target.projectId);
+      if (proj?.sharedAccessRole === 'viewer') return prev;
+      return {
+        ...prev,
+        inventoryItems: (prev.inventoryItems ?? []).filter((i) => i.id !== itemId),
+      };
+    });
+  };
+
   const addQuickTransaction = (input: QuickTransactionInput) => {
     setState((prev) => {
       const { currencies } = prev.settings;
+      const targetProject =
+        input.pocket === 'project' && input.projectId
+          ? prev.projects.find((p) => p.id === input.projectId)
+          : undefined;
+
+      if (targetProject?.sharedAccessRole === 'viewer') {
+        return prev;
+      }
+
       const amountInFbu = convertToFbu(input.amount, input.currency, currencies);
+      const nowIso = new Date().toISOString();
 
       let nextSupports = [...prev.supports];
       let nextProjects = [...prev.projects];
       let nextSavings = [...prev.savingsGoals];
       let nextDebts = [...prev.debts];
       let nextLoans = [...prev.internalLoans];
+      let nextInventory = [...(prev.inventoryItems ?? [])];
 
       const adjustSupport = (supportId: string, deltaFbu: number) => {
         nextSupports = nextSupports.map((s) => {
@@ -579,6 +828,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
         nextLoans = [loan, ...nextLoans];
       }
+
       // Sync project tag if new
       if (input.pocket === 'project' && input.projectId && input.categoryOrSource) {
         const tag = input.categoryOrSource.trim();
@@ -592,6 +842,140 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
           return p;
         });
+      }
+
+      // Handle project inventory updates for stock purchase or stock-linked sale
+      let resolvedPurchaseLines: StockPurchaseLine[] | undefined;
+      let resolvedSaleLines: StockSaleLine[] | undefined;
+      let cogsFbu = 0;
+      let grossMarginFbu: number | undefined;
+
+      if (
+        input.pocket === 'project' &&
+        input.projectId &&
+        input.type === TransactionType.OUTFLOW &&
+        input.outflowNature === 'stock_purchase' &&
+        input.stockPurchaseLines &&
+        input.stockPurchaseLines.length > 0
+      ) {
+        resolvedPurchaseLines = input.stockPurchaseLines
+          .filter((line) => line.itemName.trim() && line.quantity > 0)
+          .map((line) => {
+            const cleanName = line.itemName.trim();
+            const lineTotalFbu = Math.max(0, Math.round(line.totalCostFbu || line.quantity * line.unitCostFbu));
+            const lineUnitFbu =
+              line.quantity > 0 ? Math.round(lineTotalFbu / line.quantity) : Math.round(line.unitCostFbu);
+
+            const idx = nextInventory.findIndex(
+              (item) =>
+                (line.itemId && item.id === line.itemId) ||
+                (item.projectId === input.projectId &&
+                  item.name.trim().toLowerCase() === cleanName.toLowerCase())
+            );
+
+            let resolvedId: string;
+            if (idx >= 0) {
+              const existing = nextInventory[idx];
+              const newQty = existing.quantity + line.quantity;
+              const newAvgCost =
+                newQty > 0
+                  ? Math.round(
+                      (Math.max(0, existing.quantity) * existing.averageUnitCostFbu + lineTotalFbu) /
+                        newQty
+                    )
+                  : lineUnitFbu;
+              nextInventory[idx] = {
+                ...existing,
+                unit: line.unit.trim() || existing.unit,
+                quantity: newQty,
+                averageUnitCostFbu: newAvgCost,
+                totalPurchasedQty: existing.totalPurchasedQty + line.quantity,
+                minStockThreshold:
+                  line.minStockThreshold !== undefined
+                    ? line.minStockThreshold
+                    : existing.minStockThreshold,
+                updatedAt: nowIso,
+              };
+              resolvedId = existing.id;
+            } else {
+              resolvedId = generateId('inv');
+              nextInventory = [
+                {
+                  id: resolvedId,
+                  projectId: input.projectId!,
+                  name: cleanName,
+                  unit: line.unit.trim() || 'pièce',
+                  quantity: line.quantity,
+                  minStockThreshold: line.minStockThreshold ?? 5,
+                  averageUnitCostFbu: lineUnitFbu,
+                  totalPurchasedQty: line.quantity,
+                  totalSoldQty: 0,
+                  totalSalesRevenueFbu: 0,
+                  totalCogsFbu: 0,
+                  updatedAt: nowIso,
+                },
+                ...nextInventory,
+              ];
+            }
+
+            return {
+              ...line,
+              itemId: resolvedId,
+              itemName: cleanName,
+              unit: line.unit.trim() || 'pièce',
+              unitCostFbu: lineUnitFbu,
+              totalCostFbu: lineTotalFbu,
+            };
+          });
+      }
+
+      if (
+        input.pocket === 'project' &&
+        input.projectId &&
+        input.type === TransactionType.INFLOW &&
+        input.stockSaleLines &&
+        input.stockSaleLines.length > 0
+      ) {
+        const preparedLines = input.stockSaleLines
+          .filter((l) => l.itemId && l.quantity > 0)
+          .map((l) => {
+            const inv = nextInventory.find((item) => item.id === l.itemId);
+            const unitCostFbu = inv ? inv.averageUnitCostFbu : l.unitCostFbu;
+            const totalCostFbu = Math.round(l.quantity * unitCostFbu);
+            return {
+              ...l,
+              itemName: inv?.name || l.itemName,
+              unit: inv?.unit || l.unit,
+              unitCostFbu,
+              totalCostFbu,
+            };
+          });
+
+        if (preparedLines.length > 0) {
+          resolvedSaleLines = preparedLines;
+          cogsFbu = preparedLines.reduce((acc, l) => acc + l.totalCostFbu, 0);
+          grossMarginFbu = amountInFbu - cogsFbu;
+
+          const totalWeight = cogsFbu > 0 ? cogsFbu : preparedLines.length;
+          nextInventory = nextInventory.map((item) => {
+            const matched = preparedLines.find((l) => l.itemId === item.id);
+            if (!matched) return item;
+            const revenueShare =
+              preparedLines.length === 1
+                ? amountInFbu
+                : cogsFbu > 0
+                ? Math.round((matched.totalCostFbu / totalWeight) * amountInFbu)
+                : Math.round(amountInFbu / preparedLines.length);
+            return {
+              ...item,
+              quantity: Math.max(0, item.quantity - matched.quantity),
+              totalSoldQty: item.totalSoldQty + matched.quantity,
+              totalCogsFbu: item.totalCogsFbu + matched.totalCostFbu,
+              totalSalesRevenueFbu: item.totalSalesRevenueFbu + revenueShare,
+              updatedAt: nowIso,
+            };
+          });
+        }
       }
 
       // Sync savings goal if selected
@@ -626,6 +1010,10 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
       }
 
+      const account = prev.settings.account;
+      const authorName = account?.displayName?.trim() || 'Moi';
+      const authorRole: ProjectRole = targetProject?.sharedAccessRole ?? 'owner';
+
       const tx: Transaction = {
         id: generateId('tx'),
         type: input.type,
@@ -643,13 +1031,40 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
         label: input.label.trim() || 'Opération',
         categoryOrSource: input.categoryOrSource,
         note: input.note?.trim() || undefined,
-        createdAt: new Date().toISOString(),
+        outflowNature:
+          input.pocket === 'project' && input.type === TransactionType.OUTFLOW
+            ? input.outflowNature || 'operating_expense'
+            : undefined,
+        stockPurchaseLines: resolvedPurchaseLines,
+        stockSaleLines: resolvedSaleLines,
+        cogsFbu: resolvedSaleLines ? cogsFbu : undefined,
+        grossMarginFbu,
+        authorName,
+        authorInitials: getInitials(authorName),
+        authorRole,
+        createdAt: nowIso,
       };
+
+      const nextQueue: SharedProjectSyncOp[] =
+        targetProject?.isShared && targetProject.id
+          ? [
+              ...(prev.pendingSyncQueue ?? []),
+              {
+                id: generateId('sync'),
+                projectId: targetProject.id,
+                kind: 'insert_transaction',
+                payload: tx,
+                createdAt: nowIso,
+              },
+            ]
+          : prev.pendingSyncQueue ?? [];
 
       return {
         ...prev,
         supports: nextSupports,
         projects: nextProjects,
+        inventoryItems: nextInventory,
+        pendingSyncQueue: nextQueue,
         savingsGoals: nextSavings,
         debts: nextDebts,
         internalLoans: nextLoans,
@@ -659,10 +1074,19 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const deleteTransaction = (id: string) => {
-    setState((prev) => ({
-      ...prev,
-      transactions: prev.transactions.filter((t) => t.id !== id),
-    }));
+    setState((prev) => {
+      const target = prev.transactions.find((t) => t.id === id);
+      if (target?.projectId) {
+        const proj = prev.projects.find((p) => p.id === target.projectId);
+        if (proj?.sharedAccessRole && proj.sharedAccessRole !== 'owner') {
+          return prev;
+        }
+      }
+      return {
+        ...prev,
+        transactions: prev.transactions.filter((t) => t.id !== id),
+      };
+    });
   };
 
   const createInternalLoan: FinanceContextValue['createInternalLoan'] = ({
@@ -1093,6 +1517,8 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
           },
         };
         setState(syncedState);
+        void refreshPushNotifications();
+        void syncPushTokenWithSupabase();
         return {
           ok: true,
           message: 'Compte connecté et données chargées sur cet appareil.',
@@ -1116,6 +1542,8 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (navigator.onLine) {
         await pushFinanceStateToCloud(nextState);
       }
+      void refreshPushNotifications();
+      void syncPushTokenWithSupabase();
       return {
         ok: true,
         message: 'Compte connecté. Vos données seront synchronisées dès détection réseau.',
@@ -1133,6 +1561,7 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Déconnexion & nettoyage des données sur un appareil emprunté
   const logoutRemoteAccount = async (): Promise<void> => {
+    await removeCachedPushTokenFromSupabase();
     try {
       const { signOutRemote } = await import('../utils/cloudSync');
       await signOutRemote();
@@ -1192,6 +1621,621 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (unsubscribeReconnect) unsubscribeReconnect();
     };
   }, [state]);
+
+  // Ref pour garder la trace idempotente des transactions déjà reçues
+  const knownTxIdsRef = useRef<Set<string>>(new Set(state.transactions.map((t) => t.id)));
+  useEffect(() => {
+    knownTxIdsRef.current = new Set(state.transactions.map((t) => t.id));
+  }, [state.transactions]);
+
+  // Collaboration isolée : activation partage, gestion membres, rejoindre par code & sync queue
+  const enableProjectSharing: FinanceContextValue['enableProjectSharing'] = async (
+    projectId
+  ) => {
+    const target = state.projects.find((p) => p.id === projectId);
+    if (!target) return { ok: false, message: 'Projet introuvable.' };
+
+    const code = target.inviteCode || generateInviteCode();
+    const ownerName = state.settings.account?.displayName?.trim() || 'Propriétaire';
+    const ownerEmail = state.settings.account?.email?.trim().toLowerCase() || 'owner@tomi.local';
+    const nowIso = new Date().toISOString();
+
+    const updatedProject: Project = {
+      ...target,
+      isShared: true,
+      sharedAccessRole: 'owner',
+      ownerName,
+      inviteCode: code,
+      lastSyncedAt: nowIso,
+    };
+
+    const existingOwnerMember = (state.projectMembers ?? []).find(
+      (m) => m.projectId === projectId && m.role === 'owner'
+    );
+    const ownerMember: ProjectMember = existingOwnerMember || {
+      id: generateId('mem'),
+      projectId,
+      email: ownerEmail,
+      displayName: ownerName,
+      initials: getInitials(ownerName),
+      role: 'owner',
+      status: 'active',
+      inviteCode: code,
+      invitedAt: nowIso,
+      joinedAt: nowIso,
+    };
+
+    const nextMembers = existingOwnerMember
+      ? state.projectMembers ?? []
+      : [ownerMember, ...(state.projectMembers ?? [])];
+
+    setState((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => (p.id === projectId ? updatedProject : p)),
+      projectMembers: nextMembers,
+    }));
+
+    if (isSupabaseConfigured && navigator.onLine) {
+      try {
+        const { publishSharedProjectRemote } = await import('../utils/cloudSync');
+        const projSupports = state.supports.filter(
+          (s) => s.ownerType === 'project' && s.ownerId === projectId
+        );
+        const projInventory = (state.inventoryItems ?? []).filter(
+          (i) => i.projectId === projectId
+        );
+        const projMembers = nextMembers.filter((m) => m.projectId === projectId);
+        const pushed = await publishSharedProjectRemote(
+          updatedProject,
+          projSupports,
+          projInventory,
+          projMembers
+        );
+        if (pushed) {
+          void refreshPushNotifications();
+          void syncPushTokenWithSupabase();
+          return {
+            ok: true,
+            inviteCode: code,
+            message: 'Partage activé et synchronisé sur Supabase (cloisonnement strict).',
+          };
+        }
+      } catch (err) {
+        return {
+          ok: true,
+          inviteCode: code,
+          message:
+            err instanceof Error
+              ? `Partage activé localement (sync cloud en attente : ${err.message})`
+              : 'Partage activé localement.',
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      inviteCode: code,
+      message: isSupabaseConfigured
+        ? 'Partage activé localement. Connectez votre compte Cloud pour inviter à distance.'
+        : 'Partage activé en mode local/aperçu (code généré). Configurez Supabase pour la synchro temps réel.',
+    };
+  };
+
+  const inviteProjectMember: FinanceContextValue['inviteProjectMember'] = async ({
+    projectId,
+    email,
+    displayName,
+    role,
+  }) => {
+    const proj = state.projects.find((p) => p.id === projectId);
+    if (!proj) return { ok: false, message: 'Projet introuvable.' };
+    if (proj.sharedAccessRole && proj.sharedAccessRole !== 'owner') {
+      return { ok: false, message: 'Seul le propriétaire peut inviter des associés.' };
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return { ok: false, message: 'Veuillez saisir une adresse e-mail valide.' };
+    }
+
+    const cleanName = displayName.trim() || cleanEmail.split('@')[0];
+    const nowIso = new Date().toISOString();
+    const code = proj.inviteCode || generateInviteCode();
+
+    const member: ProjectMember = {
+      id: generateId('mem'),
+      projectId,
+      email: cleanEmail,
+      displayName: cleanName,
+      initials: getInitials(cleanName),
+      role: role === 'owner' ? 'manager' : role,
+      status: 'invited',
+      inviteCode: code,
+      invitedAt: nowIso,
+    };
+
+    setState((prev) => {
+      const existing = (prev.projectMembers ?? []).some(
+        (m) => m.projectId === projectId && m.email.toLowerCase() === cleanEmail
+      );
+      const nextMembers = existing
+        ? (prev.projectMembers ?? []).map((m) =>
+            m.projectId === projectId && m.email.toLowerCase() === cleanEmail
+              ? { ...m, displayName: cleanName, role: member.role }
+              : m
+          )
+        : [...(prev.projectMembers ?? []), member];
+
+      return {
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId ? { ...p, isShared: true, inviteCode: code } : p
+        ),
+        projectMembers: nextMembers,
+        pendingSyncQueue: [
+          ...(prev.pendingSyncQueue ?? []),
+          {
+            id: generateId('sync'),
+            projectId,
+            kind: 'upsert_member',
+            payload: member,
+            createdAt: nowIso,
+          },
+        ],
+      };
+    });
+
+    if (isSupabaseConfigured && navigator.onLine) {
+      try {
+        const { inviteProjectMemberRemote } = await import('../utils/cloudSync');
+        await inviteProjectMemberRemote(member);
+      } catch {
+        // Reste dans la file pendingSyncQueue pour retry automatique
+      }
+    }
+
+    return {
+      ok: true,
+      message: `Invitation enregistrée pour ${cleanName} (${role === 'viewer' ? 'Observateur' : 'Associé'}). Partagez le code ${code}.`,
+    };
+  };
+
+  const updateProjectMemberRole: FinanceContextValue['updateProjectMemberRole'] = async (
+    memberId,
+    role
+  ) => {
+    let updatedMember: ProjectMember | null = null;
+    setState((prev) => {
+      const target = (prev.projectMembers ?? []).find((m) => m.id === memberId);
+      if (!target || target.role === 'owner') return prev;
+      const proj = prev.projects.find((p) => p.id === target.projectId);
+      if (proj?.sharedAccessRole && proj.sharedAccessRole !== 'owner') return prev;
+
+      updatedMember = { ...target, role };
+      return {
+        ...prev,
+        projectMembers: (prev.projectMembers ?? []).map((m) =>
+          m.id === memberId ? updatedMember! : m
+        ),
+      };
+    });
+
+    if (updatedMember && isSupabaseConfigured && navigator.onLine) {
+      try {
+        const { inviteProjectMemberRemote } = await import('../utils/cloudSync');
+        await inviteProjectMemberRemote(updatedMember);
+      } catch {
+        // Ignoré si hors-ligne
+      }
+    }
+  };
+
+  const removeProjectMember: FinanceContextValue['removeProjectMember'] = async (memberId) => {
+    const target = (state.projectMembers ?? []).find((m) => m.id === memberId);
+    if (!target || target.role === 'owner') return;
+    const proj = state.projects.find((p) => p.id === target.projectId);
+    if (proj?.sharedAccessRole && proj.sharedAccessRole !== 'owner') return;
+
+    setState((prev) => ({
+      ...prev,
+      projectMembers: (prev.projectMembers ?? []).filter((m) => m.id !== memberId),
+    }));
+
+    if (isSupabaseConfigured && navigator.onLine) {
+      try {
+        const { removeProjectMemberRemote } = await import('../utils/cloudSync');
+        await removeProjectMemberRemote(target.projectId, memberId);
+      } catch {
+        // Ignoré si hors-ligne
+      }
+    }
+  };
+
+  const joinSharedProjectByCode: FinanceContextValue['joinSharedProjectByCode'] = async (
+    inviteCode
+  ) => {
+    const cleanCode = inviteCode.trim().toUpperCase();
+    if (!cleanCode) {
+      return { ok: false, message: 'Veuillez saisir un code d’invitation valide.' };
+    }
+
+    // Vérifie d'abord si le projet existe déjà localement
+    const localMatch = state.projects.find(
+      (p) => p.inviteCode?.toUpperCase() === cleanCode
+    );
+    if (localMatch) {
+      return {
+        ok: true,
+        projectId: localMatch.id,
+        message: `Le projet « ${localMatch.name} » est déjà ouvert sur cet appareil.`,
+      };
+    }
+
+    if (!isSupabaseConfigured) {
+      return {
+        ok: false,
+        message:
+          'Supabase non configuré sur cet appareil. Exécutez le script SQL dans Supabase et configurez .env.local pour rejoindre un projet distant.',
+      };
+    }
+
+    try {
+      const displayName = state.settings.account?.displayName?.trim() || 'Associé';
+      const { joinSharedProjectByCodeRemote } = await import('../utils/cloudSync');
+      const bundle = await joinSharedProjectByCodeRemote(
+        cleanCode,
+        displayName,
+        getInitials(displayName)
+      );
+
+      setState((prev) => {
+        const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
+          const map = new Map(existing.map((e) => [e.id, e]));
+          for (const item of incoming) map.set(item.id, item);
+          return Array.from(map.values());
+        };
+
+        return {
+          ...prev,
+          projects: mergeById(prev.projects, [bundle.project]),
+          supports: mergeById(prev.supports, bundle.supports),
+          inventoryItems: mergeById(prev.inventoryItems ?? [], bundle.inventory),
+          projectMembers: mergeById(prev.projectMembers ?? [], bundle.members),
+          transactions: mergeById(prev.transactions, bundle.transactions).sort((a, b) =>
+            b.createdAt.localeCompare(a.createdAt)
+          ),
+        };
+      });
+
+      void refreshPushNotifications();
+      void syncPushTokenWithSupabase();
+
+      return {
+        ok: true,
+        projectId: bundle.project.id,
+        message: `Projet « ${bundle.project.name} » rejoint avec succès (accès isolé uniquement à ce projet).`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Impossible de rejoindre ce projet avec ce code.',
+      };
+    }
+  };
+
+  const syncSharedProjectsNow: FinanceContextValue['syncSharedProjectsNow'] = async () => {
+    if (!isSupabaseConfigured) {
+      return {
+        ok: false,
+        message: 'Mode local actif : Supabase non configuré.',
+      };
+    }
+    if (!navigator.onLine) {
+      return {
+        ok: false,
+        message: 'Appareil hors-ligne : les opérations en attente seront envoyées dès reconnexion.',
+      };
+    }
+
+    try {
+      const {
+        fetchUserSharedProjectsRemote,
+        inviteProjectMemberRemote,
+        publishSharedProjectRemote,
+        pushProjectTransactionRemote,
+        upsertInventoryItemRemote,
+      } = await import('../utils/cloudSync');
+
+      const queue = state.pendingSyncQueue ?? [];
+      const failedOps: SharedProjectSyncOp[] = [];
+
+      for (const op of queue) {
+        try {
+          if (op.kind === 'insert_transaction') {
+            const tx = op.payload as Transaction;
+            const projSups = state.supports.filter(
+              (s) => s.ownerType === 'project' && s.ownerId === op.projectId
+            );
+            const projInv = (state.inventoryItems ?? []).filter(
+              (i) => i.projectId === op.projectId
+            );
+            await pushProjectTransactionRemote(tx, projSups, projInv);
+          } else if (op.kind === 'upsert_inventory') {
+            await upsertInventoryItemRemote(op.payload as InventoryItem);
+          } else if (op.kind === 'upsert_member') {
+            await inviteProjectMemberRemote(op.payload as ProjectMember);
+          } else if (op.kind === 'upsert_project') {
+            const proj = state.projects.find((p) => p.id === op.projectId);
+            if (proj) {
+              await publishSharedProjectRemote(
+                proj,
+                state.supports.filter((s) => s.ownerId === proj.id),
+                (state.inventoryItems ?? []).filter((i) => i.projectId === proj.id),
+                (state.projectMembers ?? []).filter((m) => m.projectId === proj.id)
+              );
+            }
+          }
+        } catch {
+          failedOps.push(op);
+        }
+      }
+
+      const bundles = await fetchUserSharedProjectsRemote();
+      setState((prev) => {
+        const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
+          const map = new Map(existing.map((e) => [e.id, e]));
+          for (const item of incoming) map.set(item.id, item);
+          return Array.from(map.values());
+        };
+
+        let nextProjects = prev.projects;
+        let nextSupports = prev.supports;
+        let nextInventory = prev.inventoryItems ?? [];
+        let nextMembers = prev.projectMembers ?? [];
+        let nextTxs = prev.transactions;
+
+        for (const b of bundles) {
+          nextProjects = mergeById(nextProjects, [b.project]);
+          nextSupports = mergeById(nextSupports, b.supports);
+          nextInventory = mergeById(nextInventory, b.inventory);
+          nextMembers = mergeById(nextMembers, b.members);
+          nextTxs = mergeById(nextTxs, b.transactions);
+        }
+
+        return {
+          ...prev,
+          projects: nextProjects,
+          supports: nextSupports,
+          inventoryItems: nextInventory,
+          projectMembers: nextMembers,
+          transactions: nextTxs.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+          pendingSyncQueue: failedOps,
+        };
+      });
+
+      return {
+        ok: true,
+        message: 'Projets partagés synchronisés.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error ? err.message : 'Erreur lors de la synchronisation partagée.',
+      };
+    }
+  };
+
+  // Flush automatique de la file d'attente hors-ligne des projets partagés dès retour réseau
+  useEffect(() => {
+    const pendingCount = state.pendingSyncQueue?.length ?? 0;
+    if (pendingCount === 0 || !isSupabaseConfigured) return;
+
+    if (navigator.onLine) {
+      void syncSharedProjectsNow();
+    }
+
+    let cleanup: (() => void) | undefined;
+    void (async () => {
+      const { onNetworkReconnect } = await import('../utils/cloudSync');
+      cleanup = onNetworkReconnect(() => {
+        void syncSharedProjectsNow();
+      });
+    })();
+
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, [state.pendingSyncQueue?.length, persistenceStatus.isOnline]);
+
+  // Abonnement Supabase Realtime sur les projets partagés (transactions, stocks, membres)
+  const sharedProjectIdsKey = useMemo(
+    () =>
+      state.projects
+        .filter((p) => p.isShared)
+        .map((p) => p.id)
+        .sort()
+        .join(','),
+    [state.projects]
+  );
+
+  useEffect(() => {
+    if (!sharedProjectIdsKey || !isSupabaseConfigured || !persistenceStatus.isOnline) {
+      return;
+    }
+    const ids = sharedProjectIdsKey.split(',').filter(Boolean);
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    void (async () => {
+      const { subscribeToSharedProjectsRealtime } = await import('../utils/cloudSync');
+      if (cancelled) return;
+
+      unsubscribe = subscribeToSharedProjectsRealtime(ids, {
+        onRemoteTransaction: (remoteTx) => {
+          if (knownTxIdsRef.current.has(remoteTx.id)) return;
+          knownTxIdsRef.current.add(remoteTx.id);
+
+          setState((prev) => {
+            if (prev.transactions.some((t) => t.id === remoteTx.id)) return prev;
+            const { currencies } = prev.settings;
+            const deltaFbu =
+              remoteTx.type === TransactionType.INFLOW
+                ? remoteTx.amountInFbu
+                : remoteTx.type === TransactionType.OUTFLOW
+                ? -remoteTx.amountInFbu
+                : 0;
+
+            const nextSupports = prev.supports.map((s) => {
+              if (s.id !== remoteTx.supportId || deltaFbu === 0) return s;
+              const deltaCurr = convertFromFbu(deltaFbu, s.currency, currencies);
+              return { ...s, balance: Math.round((s.balance + deltaCurr) * 100) / 100 };
+            });
+
+            const proj = prev.projects.find((p) => p.id === remoteTx.projectId);
+            const roleLabel =
+              remoteTx.authorRole === 'owner' ? 'Propriétaire' : 'Associé';
+            const sign = remoteTx.type === TransactionType.INFLOW ? '+' : '-';
+            const notifTitle = `${proj?.name || 'Projet partagé'} · ${remoteTx.authorName || roleLabel}`;
+            const notifMsg = `${roleLabel} (${remoteTx.authorInitials || 'AS'}) : ${sign}${remoteTx.amountInFbu.toLocaleString('fr-FR')} FBU — ${remoteTx.label}`;
+
+            const notif: NotificationItem = {
+              id: generateId('notif'),
+              dedupeKey: `shared_tx_${remoteTx.id}`,
+              category: 'shared_activity',
+              title: notifTitle,
+              message: notifMsg,
+              severity: 'info',
+              createdAt: new Date().toISOString(),
+              read: false,
+              targetTab: 'projects',
+              targetProjectId: remoteTx.projectId,
+              actionLabel: 'Voir projet',
+            };
+
+            return {
+              ...prev,
+              supports: nextSupports,
+              transactions: [remoteTx, ...prev.transactions],
+              notifications: [notif, ...(prev.notifications ?? [])].slice(0, 50),
+            };
+          });
+
+          const roleLabel = remoteTx.authorRole === 'owner' ? 'Propriétaire' : 'Associé';
+          const sign = remoteTx.type === TransactionType.INFLOW ? '+' : '-';
+          showNotifToast(
+            `Nouvelle écriture · ${remoteTx.authorName || roleLabel}`,
+            `${sign}${remoteTx.amountInFbu.toLocaleString('fr-FR')} FBU — ${remoteTx.label}`,
+            'info'
+          );
+          void haptics.tap();
+        },
+        onRemoteInventory: (remoteItem) => {
+          setState((prev) => {
+            const list = prev.inventoryItems ?? [];
+            const exists = list.some((i) => i.id === remoteItem.id);
+            return {
+              ...prev,
+              inventoryItems: exists
+                ? list.map((i) => (i.id === remoteItem.id ? remoteItem : i))
+                : [remoteItem, ...list],
+            };
+          });
+        },
+        onRemoteMember: (remoteMember) => {
+          setState((prev) => {
+            const list = prev.projectMembers ?? [];
+            const exists = list.some((m) => m.id === remoteMember.id);
+            return {
+              ...prev,
+              projectMembers: exists
+                ? list.map((m) => (m.id === remoteMember.id ? remoteMember : m))
+                : [...list, remoteMember],
+            };
+          });
+        },
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unsubscribe) unsubscribe();
+    };
+  }, [sharedProjectIdsKey, persistenceStatus.isOnline]);
+
+  // Initialisation Push Notifications natives Android (FCM) + synchro token Supabase
+  useEffect(() => {
+    const unsubStatus = subscribePushStatus(setPushStatus);
+
+    void initNativePushNotifications({
+      onForegroundPush: (payload) => {
+        void haptics.success();
+        showNotifToast(payload.title, payload.body, 'info', payload.projectId);
+
+        const dedupeKey = payload.transactionId
+          ? `shared_tx_${payload.transactionId}`
+          : `fcm_${payload.projectId || 'global'}_${Date.now()}`;
+
+        setState((prev) => {
+          const exists = (prev.notifications ?? []).some(
+            (n) => n.dedupeKey === dedupeKey
+          );
+          if (exists) return prev;
+          const item: NotificationItem = {
+            id: generateId('notif'),
+            dedupeKey,
+            category: 'shared_activity',
+            title: payload.title,
+            message: payload.body,
+            severity: 'info',
+            createdAt: new Date().toISOString(),
+            read: false,
+            targetTab: payload.projectId ? 'projects' : 'home',
+            targetProjectId: payload.projectId,
+            actionLabel: payload.projectId ? 'Voir le projet' : undefined,
+          };
+          return {
+            ...prev,
+            notifications: [item, ...(prev.notifications ?? [])].slice(0, 50),
+          };
+        });
+
+        if (navigator.onLine && isSupabaseConfigured) {
+          void syncSharedProjectsNow();
+        }
+      },
+      onNotificationTap: (payload) => {
+        void haptics.tap();
+        if (payload.projectId) {
+          setPendingProjectNavigationId(payload.projectId);
+        }
+        if (navigator.onLine && isSupabaseConfigured) {
+          void syncSharedProjectsNow();
+        }
+      },
+    });
+
+    const authSub = supabase?.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        void syncPushTokenWithSupabase();
+      }
+    });
+
+    return () => {
+      unsubStatus();
+      authSub?.data?.subscription?.unsubscribe();
+      void cleanupNativePushListeners();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (persistenceStatus.isOnline && isSupabaseConfigured) {
+      void syncPushTokenWithSupabase();
+    }
+  }, [persistenceStatus.isOnline, sharedProjectIdsKey, state.settings.account?.mode]);
 
   const showPrivacyToast = (msg: string) => {
     setPrivacyToast(msg);
@@ -1272,16 +2316,17 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const showNotifToast = (
     title: string,
     message: string,
-    severity: 'info' | 'warning' | 'danger' = 'info'
+    severity: 'info' | 'warning' | 'danger' = 'info',
+    projectId?: string
   ) => {
-    setNotificationToast({ title, message, severity });
+    setNotificationToast({ title, message, severity, projectId });
     if (notifToastTimerRef.current !== null) {
       window.clearTimeout(notifToastTimerRef.current);
     }
     notifToastTimerRef.current = window.setTimeout(() => {
       setNotificationToast(null);
       notifToastTimerRef.current = null;
-    }, 3600);
+    }, 4200);
   };
 
   const updateNotificationSettings = (patch: Partial<NotificationSettings>) => {
@@ -1377,6 +2422,16 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     updateProject,
     deleteProject,
     addProjectTag,
+    getProjectRole,
+    upsertInventoryItem,
+    updateInventoryThreshold,
+    deleteInventoryItem,
+    enableProjectSharing,
+    inviteProjectMember,
+    updateProjectMemberRole,
+    removeProjectMember,
+    joinSharedProjectByCode,
+    syncSharedProjectsNow,
     addQuickTransaction,
     deleteTransaction,
     createInternalLoan,
@@ -1419,6 +2474,11 @@ export const FinanceProvider: React.FC<{ children: React.ReactNode }> = ({ child
     unreadNotificationsCount,
     notificationSettings,
     notificationToast,
+    pushStatus,
+    pendingProjectNavigationId,
+    requestOpenProject,
+    clearPendingProjectNavigation,
+    refreshNativePush: refreshPushNotifications,
     updateNotificationSettings,
     markNotificationRead,
     markAllNotificationsRead,

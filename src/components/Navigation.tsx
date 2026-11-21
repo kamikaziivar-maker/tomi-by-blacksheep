@@ -2,6 +2,7 @@ import React from 'react';
 import {
   Bell,
   Briefcase,
+  Calculator,
   Home,
   Landmark,
   Lock,
@@ -12,11 +13,13 @@ import {
 import { useFinance } from '../store/FinanceContext';
 import { NavTab } from '../types/finance';
 import { BrandLogo } from './BrandLogo';
+import { CustomSelect } from './CustomSelect';
 
 interface NavigationProps {
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   onOpenQuickEntry: () => void;
+  onOpenCalculator: () => void;
   onOpenSettings: () => void;
   onOpenNotifications: () => void;
 }
@@ -32,6 +35,7 @@ export const DesktopSidebar: React.FC<NavigationProps> = ({
   activeTab,
   onSelectTab,
   onOpenQuickEntry,
+  onOpenCalculator,
   onOpenSettings,
   onOpenNotifications,
 }) => {
@@ -93,8 +97,17 @@ export const DesktopSidebar: React.FC<NavigationProps> = ({
         })}
       </nav>
 
-      {/* Bottom Notifications + Settings + Discreet Local Backup Status + Fujistudio signature */}
+      {/* Bottom Calculator + Notifications + Settings + Discreet Local Backup Status + Fujistudio signature */}
       <div className="mt-auto pt-4 border-t border-zinc-800/70 space-y-1.5">
+        <button
+          type="button"
+          onClick={onOpenCalculator}
+          className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-[#F5B971] hover:bg-zinc-900/70 transition-colors"
+        >
+          <Calculator className="h-4 w-4 shrink-0" />
+          <span>Calculatrice rapide</span>
+        </button>
+
         <button
           type="button"
           onClick={onOpenNotifications}
@@ -148,9 +161,10 @@ export const DesktopSidebar: React.FC<NavigationProps> = ({
 
 export const MobileTopBar: React.FC<{
   title: string;
+  onOpenCalculator: () => void;
   onOpenSettings: () => void;
   onOpenNotifications: () => void;
-}> = ({ title, onOpenSettings, onOpenNotifications }) => {
+}> = ({ title, onOpenCalculator, onOpenSettings, onOpenNotifications }) => {
   const {
     state,
     setDisplayCurrency,
@@ -185,21 +199,35 @@ export const MobileTopBar: React.FC<{
             {mobileStatusText}
           </span>
 
-          <label htmlFor="display-currency-select" className="sr-only">
-            Devise d’affichage
-          </label>
-          <select
+          <CustomSelect
             id="display-currency-select"
             value={state.settings.displayCurrency}
-            onChange={(e) => setDisplayCurrency(e.target.value)}
-            className="h-9 rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs font-semibold text-[#F5B971] focus:border-[#F5B971] focus:outline-none"
+            onChange={(val) => setDisplayCurrency(val)}
+            title="Devise d’affichage"
+            searchable={false}
+            ariaLabel="Devise d’affichage"
+            options={state.settings.currencies.map((c) => ({
+              value: c.code,
+              label: `${c.code} — ${c.name}`,
+              badge: c.symbol,
+            }))}
+            renderSelected={(opt) => (
+              <span className="font-mono-num text-xs font-semibold text-[#F5B971]">
+                {opt?.value || state.settings.displayCurrency}
+              </span>
+            )}
+            className="h-9 rounded-lg border border-zinc-800 bg-[#141417] px-2.5 text-xs font-semibold text-[#F5B971] hover:border-zinc-700"
+          />
+
+          <button
+            type="button"
+            onClick={onOpenCalculator}
+            aria-label="Ouvrir la calculatrice"
+            title="Calculatrice rapide"
+            className="flex h-10 w-10 items-center justify-center rounded-lg border border-[#F5B971]/40 bg-[#141417] text-[#F5B971] hover:bg-[#F5B971]/15 transition-colors"
           >
-            {state.settings.currencies.map((c) => (
-              <option key={c.code} value={c.code}>
-                {c.code}
-              </option>
-            ))}
-          </select>
+            <Calculator className="h-4 w-4" />
+          </button>
 
           <button
             type="button"

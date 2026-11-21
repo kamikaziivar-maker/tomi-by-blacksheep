@@ -56,6 +56,66 @@ export interface FundSupport {
   logoDataUrl?: string; // compressed miniature base64 logo for bank / mobile money
 }
 
+export type ProjectOutflowNature = 'operating_expense' | 'stock_purchase';
+
+export type ProjectRole = 'owner' | 'manager' | 'viewer';
+
+export interface StockPurchaseLine {
+  itemId?: string;
+  itemName: string;
+  unit: string;
+  quantity: number;
+  unitCostFbu: number;
+  totalCostFbu: number;
+  minStockThreshold?: number;
+}
+
+export interface StockSaleLine {
+  itemId: string;
+  itemName: string;
+  unit: string;
+  quantity: number;
+  unitCostFbu: number;
+  totalCostFbu: number;
+}
+
+export interface InventoryItem {
+  id: string;
+  projectId: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  minStockThreshold: number;
+  averageUnitCostFbu: number;
+  totalPurchasedQty: number;
+  totalSoldQty: number;
+  totalSalesRevenueFbu: number;
+  totalCogsFbu: number;
+  updatedAt: string;
+}
+
+export interface ProjectMember {
+  id: string;
+  projectId: string;
+  email: string;
+  displayName: string;
+  initials: string;
+  role: ProjectRole;
+  status: 'invited' | 'active';
+  inviteCode?: string;
+  userId?: string;
+  invitedAt: string;
+  joinedAt?: string;
+}
+
+export interface SharedProjectSyncOp {
+  id: string;
+  projectId: string;
+  kind: 'upsert_project' | 'insert_transaction' | 'upsert_inventory' | 'upsert_member' | 'delete_member';
+  payload: unknown;
+  createdAt: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -66,6 +126,13 @@ export interface Project {
   expenseCategories: string[];
   createdAt: string;
   colorAccent?: string;
+  ownerUserId?: string;
+  ownerName?: string;
+  isShared?: boolean;
+  /** Role on this device when joined as a collaborator; undefined or 'owner' for owned projects */
+  sharedAccessRole?: ProjectRole;
+  inviteCode?: string;
+  lastSyncedAt?: string;
 }
 
 export interface Transaction {
@@ -85,6 +152,15 @@ export interface Transaction {
   label: string; // libellé / nom client, fournisseur, créancier
   categoryOrSource?: string; // revenue source or expense post
   note?: string;
+  outflowNature?: ProjectOutflowNature;
+  stockPurchaseLines?: StockPurchaseLine[];
+  stockSaleLines?: StockSaleLine[];
+  cogsFbu?: number;
+  grossMarginFbu?: number;
+  authorUserId?: string;
+  authorName?: string;
+  authorInitials?: string;
+  authorRole?: ProjectRole;
   createdAt: string;
 }
 
@@ -159,6 +235,7 @@ export interface AccountSecuritySettings {
   cloudSyncUrl?: string;
   pinEnabled: boolean;
   pinHash?: string;
+  localProfileConfirmedAt?: string;
 }
 
 export type ShakeSensitivity = 'soft' | 'normal' | 'strong';
@@ -168,7 +245,9 @@ export type NotificationCategory =
   | 'debts'
   | 'projects_redline'
   | 'ai_reports'
-  | 'daily_entry';
+  | 'daily_entry'
+  | 'low_stock'
+  | 'shared_activity';
 
 export interface NotificationItem {
   id: string;
@@ -211,6 +290,9 @@ export interface FinanceState {
   settings: AppSettings;
   supports: FundSupport[];
   projects: Project[];
+  inventoryItems?: InventoryItem[];
+  projectMembers?: ProjectMember[];
+  pendingSyncQueue?: SharedProjectSyncOp[];
   transactions: Transaction[];
   internalLoans: InternalLoan[];
   debts: DebtItem[];

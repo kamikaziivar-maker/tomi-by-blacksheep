@@ -120,3 +120,44 @@ export function formatShortDate(dateStr: string): string {
     month: 'short',
   }).format(d);
 }
+
+export function sanitizeSignedNumberInput(raw: string): string {
+  const replaced = raw.replace(/\u2212/g, '-').replace(/,/g, '.');
+  let result = '';
+  let hasSign = false;
+  let hasDot = false;
+  for (let i = 0; i < replaced.length; i++) {
+    const ch = replaced[i];
+    if ((ch === '-' || ch === '+') && i === 0 && !hasSign) {
+      if (ch === '-') result += '-';
+      hasSign = true;
+    } else if (ch >= '0' && ch <= '9') {
+      result += ch;
+    } else if (ch === '.' && !hasDot) {
+      result += '.';
+      hasDot = true;
+    }
+  }
+  return result;
+}
+
+export function toggleSignedInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('-')) {
+    return trimmed.slice(1);
+  }
+  if (trimmed.startsWith('+')) {
+    return `-${trimmed.slice(1)}`;
+  }
+  return `-${trimmed}`;
+}
+
+export function parseSignedAmount(raw: string): number {
+  const normalized = raw
+    .replace(/\u2212/g, '-')
+    .replace(/\s+/g, '')
+    .replace(',', '.');
+  const parsed = parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+

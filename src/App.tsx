@@ -3,6 +3,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { Bell, Eye, EyeOff } from 'lucide-react';
 import { AmbientNeonFlows } from './components/AmbientNeonFlows';
+import { CalculatorModal } from './components/CalculatorModal';
 import {
   FirstLaunchGuide,
   shouldShowFirstLaunchGuide,
@@ -20,7 +21,13 @@ import { SplashScreen } from './components/SplashScreen';
 import { SupportManagerModal } from './components/SupportManagerModal';
 import { useShakeDetector } from './hooks/useShakeDetector';
 import { FinanceProvider, useFinance } from './store/FinanceContext';
-import { NavTab, PocketTarget, Project, TransactionType } from './types/finance';
+import {
+  NavTab,
+  PocketTarget,
+  Project,
+  ProjectOutflowNature,
+  TransactionType,
+} from './types/finance';
 import { haptics } from './utils/haptics';
 import { AiCoachView } from './views/AiCoachView';
 import { DebtsSavingsView } from './views/DebtsSavingsView';
@@ -47,6 +54,8 @@ function AppShell() {
     shakeSensitivity,
     privacyToast,
     notificationToast,
+    pendingProjectNavigationId,
+    requestOpenProject,
     togglePrivacyMode,
     ambientFlowsEnabled,
   } = useFinance();
@@ -62,6 +71,8 @@ function AppShell() {
     pocket?: PocketTarget;
     projectId?: string;
     type?: TransactionType;
+    outflowNature?: ProjectOutflowNature;
+    stockItemId?: string;
   }>({});
 
   // Project Form modal state
@@ -81,10 +92,11 @@ function AppShell() {
     title: 'Compte Personnel',
   });
 
-  // Settings & Notifications modals
+  // Settings, Notifications & Calculator modals
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<'profile' | 'general'>('general');
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [calculatorOpen, setCalculatorOpen] = useState(false);
 
   // Affiche le guide de première utilisation une seule fois après splash & déverrouillage
   useEffect(() => {
@@ -92,6 +104,18 @@ function AppShell() {
       setShowFirstGuide(true);
     }
   }, [showSplash, isLocked]);
+
+  // Ouvre automatiquement l'onglet Projets lorsqu'une notification push cible un projet partagé
+  useEffect(() => {
+    if (!pendingProjectNavigationId) return;
+    setActiveTab('projects');
+    setQuickOpen(false);
+    setProjectFormOpen(false);
+    setNotificationsOpen(false);
+    setSettingsOpen(false);
+    setCalculatorOpen(false);
+    setSupportMgr((prev) => ({ ...prev, isOpen: false }));
+  }, [pendingProjectNavigationId]);
 
   const handleTogglePrivacy = useCallback(() => {
     void haptics.heavy();
@@ -106,6 +130,7 @@ function AppShell() {
       !showSplash &&
       !isLocked &&
       !quickOpen &&
+      !calculatorOpen &&
       !settingsOpen &&
       !notificationsOpen &&
       !exitConfirmOpen &&
@@ -133,6 +158,11 @@ function AppShell() {
 
       if (showFirstGuide) {
         setShowFirstGuide(false);
+        return;
+      }
+
+      if (calculatorOpen) {
+        setCalculatorOpen(false);
         return;
       }
 
@@ -178,6 +208,7 @@ function AppShell() {
     isLocked,
     exitConfirmOpen,
     showFirstGuide,
+    calculatorOpen,
     quickOpen,
     projectFormOpen,
     supportMgr.isOpen,
@@ -195,6 +226,8 @@ function AppShell() {
     pocket?: PocketTarget;
     projectId?: string;
     type?: TransactionType;
+    outflowNature?: ProjectOutflowNature;
+    stockItemId?: string;
   }) => {
     void haptics.tap();
     setQuickDefaults(opts ?? {});
@@ -261,24 +294,37 @@ function AppShell() {
         </div>
       )}
 
-      {/* Discreet In-App Notification Toast */}
+      {/* Discreet In-App Notification / Foreground Push Banner */}
       {notificationToast && !privacyToast && (
         <button
           type="button"
           onClick={() => {
             void haptics.tap();
-            setNotificationsOpen(true);
+            if (notificationToast.projectId) {
+              requestOpenProject(notificationToast.projectId);
+            } else {
+              setNotificationsOpen(true);
+            }
           }}
           role="status"
           aria-live="polite"
-          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 w-[90%] max-w-sm flex items-start gap-2.5 rounded-2xl border border-[#F5B971]/40 bg-[#141417]/95 px-4 py-3 text-left shadow-2xl backdrop-blur-md"
+          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 w-[92%] max-w-sm flex items-start gap-2.5 rounded-2xl border border-[#F5B971]/50 bg-[#121318]/95 px-4 py-3 text-left shadow-2xl backdrop-blur-md transition-all"
         >
-          <Bell className="mt-0.5 h-4 w-4 shrink-0 text-[#F5B971]" />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-zinc-100 truncate">
-              {notificationToast.title}
+          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#F5B971]/15 text-[#F5B971]">
+            <Bell className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-zinc-100 truncate">
+                {notificationToast.title}
+              </span>
+              {notificationToast.projectId && (
+                <span className="shrink-0 text-[10px] font-semibold text-[#F5B971]">
+                  Ouvrir →
+                </span>
+              )}
             </div>
-            <div className="text-[11px] text-zinc-400 line-clamp-2">
+            <div className="mt-0.5 text-[11px] text-zinc-400 line-clamp-2">
               {notificationToast.message}
             </div>
           </div>
@@ -289,6 +335,10 @@ function AppShell() {
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         onOpenQuickEntry={() => openQuickEntry()}
+        onOpenCalculator={() => {
+          void haptics.tap();
+          setCalculatorOpen(true);
+        }}
         onOpenSettings={() => {
           void haptics.tap();
           setSettingsSection('general');
@@ -303,6 +353,10 @@ function AppShell() {
       <div className="relative z-10 lg:pl-64 flex min-h-screen flex-col bg-transparent">
         <MobileTopBar
           title={TAB_TITLES[activeTab]}
+          onOpenCalculator={() => {
+            void haptics.tap();
+            setCalculatorOpen(true);
+          }}
           onOpenSettings={() => {
             void haptics.tap();
             setSettingsSection('general');
@@ -398,6 +452,8 @@ function AppShell() {
         defaultPocket={quickDefaults.pocket}
         defaultProjectId={quickDefaults.projectId}
         defaultType={quickDefaults.type}
+        defaultOutflowNature={quickDefaults.outflowNature}
+        defaultStockItemId={quickDefaults.stockItemId}
       />
 
       <ProjectFormModal
@@ -430,6 +486,11 @@ function AppShell() {
           setSettingsOpen(false);
           setShowSplash(true);
         }}
+      />
+
+      <CalculatorModal
+        isOpen={calculatorOpen}
+        onClose={() => setCalculatorOpen(false)}
       />
     </div>
   );

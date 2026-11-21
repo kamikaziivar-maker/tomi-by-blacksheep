@@ -6,6 +6,7 @@ interface CalculatorModalProps {
   isOpen: boolean;
   onClose: () => void;
   onApplyValue?: (value: number) => void;
+  allowNegative?: boolean;
 }
 
 function evaluateSafeExpression(expr: string): number | null {
@@ -28,6 +29,7 @@ export const CalculatorModal: React.FC<CalculatorModalProps> = ({
   isOpen,
   onClose,
   onApplyValue,
+  allowNegative = false,
 }) => {
   const [expr, setExpr] = useState('');
   const [copied, setCopied] = useState(false);
@@ -106,7 +108,7 @@ export const CalculatorModal: React.FC<CalculatorModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Calculatrice rapide"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
+      className="fixed inset-0 z-[60] flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4"
     >
       <div className="w-full max-w-sm rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-[#121318] p-4 text-zinc-100 shadow-2xl space-y-3">
         <div className="flex items-center justify-between">
@@ -173,7 +175,7 @@ export const CalculatorModal: React.FC<CalculatorModalProps> = ({
           {onApplyValue && (
             <button
               type="button"
-              disabled={liveResult === null || (liveResult ?? 0) <= 0}
+              disabled={liveResult === null || (!allowNegative && liveResult <= 0)}
               onClick={() => void handleApply()}
               className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#10B981] px-3 text-xs font-bold text-[#08090C] disabled:opacity-40"
             >
